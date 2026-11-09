@@ -1,0 +1,12 @@
+[package]
+name = "tessera-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tessera-domain.workspace = true
+tessera-voronoi.workspace = true
+rayon.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true

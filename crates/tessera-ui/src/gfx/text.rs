@@ -1,0 +1,230 @@
+//! Text shaping cache and glyphon renderers (one per layer).
+
+use std::collections::HashMap;
+
+use glyphon::cosmic_text::{FeatureTag, FontFeatures};
+use glyphon::{
+    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+};
+
+use super::LAYERS;
+use crate::ui::{Frame, Rect};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Font {
+    Sans,
+    /// Sans with tabular figures: numbers that line up and don't jitter.
+    Num,
+    Mono,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TextStyle {
+    pub size: f32,
+    pub weight: u16,
+    pub font: Font,
+}
+
+impl TextStyle {
+    pub const fn new(size: f32, weight: u16, font: Font) -> Self {
+        TextStyle { size, weight, font }
+    }
+    pub fn line_height(&self) -> f32 {
+        (self.size * 1.3).round()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Key {
+    text: String,
+    size: u32,
+    weight: u16,
+    font: Font,
+}
+
+impl Key {
+    fn new(text: &str, s: &TextStyle) -> Key {
+        Key { text: text.to_owned(), size: (s.size * 100.0) as u32, weight: s.weight, font: s.font }
+    }
+}
+
+struct Shaped {
+    buffer: Buffer,
+    width: f32,
+    last_used: u64,
+}
+
+pub struct TextItem {
+    pub text: String,
+    pub style: TextStyle,
+    pub pos: (f32, f32),
+    pub color: [f32; 4],
+    pub clip: Rect,
+}
+
+pub struct TextSystem {
+    fonts: FontSystem,
+    swash: SwashCache,
+    atlas: TextAtlas,
+    viewport: Viewport,
+    renderers: Vec<TextRenderer>,
+    cache: HashMap<Key, Shaped>,
+    elided: HashMap<(Key, u32), String>,
+    sans: String,
+    mono: String,
+    scale: f32,
+    frame: u64,
+}
+
+impl TextSystem {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let mut db = glyphon::fontdb::Database::new();
+        db.load_system_fonts();
+        let family_of = |file: &str| {
+            db.faces()
+                .find(|f| matches!(&f.source, glyphon::fontdb::Source::File(p) | glyphon::fontdb::Source::SharedFile(p, _) if p.file_name().is_some_and(|n| n == file)))
+                .map(|f| f.families[0].0.clone())
+        };
+        let sans = family_of("SFNS.ttf").unwrap_or_else(|| "Helvetica Neue".into());
+        let mono = family_of("SFNSMono.ttf").unwrap_or_else(|| "Menlo".into());
+        db.set_sans_serif_family(sans.clone());
+        db.set_monospace_family(mono.clone());
+        let locale = std::env::var("LANG").ok().and_then(|l| l.split('.').next().map(|s| s.replace('_', "-"))).unwrap_or_else(|| "en-US".into());
+        let fonts = FontSystem::new_with_locale_and_db(locale, db);
+
+        let cache = Cache::new(device);
+        let viewport = Viewport::new(device, &cache);
+        let mut atlas = TextAtlas::with_color_mode(device, queue, &cache, format, ColorMode::Web);
+        let renderers = (0..LAYERS).map(|_| TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None)).collect();
+        TextSystem { fonts, swash: SwashCache::new(), atlas, viewport, renderers, cache: HashMap::new(), elided: HashMap::new(), sans, mono, scale: 1.0, frame: 0 }
+    }
+
+    pub fn begin_frame(&mut self, scale: f32) {
+        if (scale - self.scale).abs() > f32::EPSILON {
+            self.cache.clear();
+            self.elided.clear();
+            self.scale = scale;
+        }
+        self.frame += 1;
+        if self.frame.is_multiple_of(120) {
+            let f = self.frame;
+            self.cache.retain(|_, s| f - s.last_used < 240);
+            if self.elided.len() > 4096 {
+                self.elided.clear();
+            }
+        }
+    }
+
+    fn shaped(&mut self, text: &str, style: &TextStyle) -> &mut Shaped {
+        let key = Key::new(text, style);
+        let frame = self.frame;
+        let scale = self.scale;
+        if !self.cache.contains_key(&key) {
+            let lh = style.line_height();
+            let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(style.size * scale, lh * scale));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, None);
+            let family = match style.font {
+                Font::Mono => Family::Name(&self.mono),
+                _ => Family::Name(&self.sans),
+            };
+            let mut attrs = Attrs::new().family(family).weight(Weight(style.weight));
+            if style.font == Font::Num {
+                let mut f = FontFeatures::new();
+                f.enable(FeatureTag::new(b"tnum"));
+                attrs = attrs.font_features(f);
+            }
+            buffer.set_text(text, &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut self.fonts, false);
+            let width = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) / scale;
+            self.cache.insert(key.clone(), Shaped { buffer, width, last_used: frame });
+        }
+        let s = self.cache.get_mut(&key).unwrap();
+        s.last_used = frame;
+        s
+    }
+
+    /// Logical width of `text` set in `style`.
+    pub fn measure(&mut self, text: &str, style: &TextStyle) -> f32 {
+        self.shaped(text, style).width
+    }
+
+    /// `text` shortened with a trailing ellipsis to fit `max_w`.
+    pub fn elide(&mut self, text: &str, style: &TextStyle, max_w: f32) -> String {
+        if self.measure(text, style) <= max_w {
+            return text.to_owned();
+        }
+        let key = (Key::new(text, style), max_w as u32);
+        if let Some(s) = self.elided.get(&key) {
+            return s.clone();
+        }
+        let ell = self.measure("…", style);
+        let scale = self.scale;
+        let budget = (max_w - ell).max(0.0) * scale;
+        let shaped = self.shaped(text, style);
+        let mut cut = 0;
+        for run in shaped.buffer.layout_runs() {
+            for g in run.glyphs {
+                if g.x + g.w <= budget && !run.rtl {
+                    cut = cut.max(g.end);
+                }
+            }
+        }
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let out = format!("{}…", text[..cut].trim_end());
+        self.elided.insert(key, out.clone());
+        out
+    }
+
+    /// Makes sure everything referenced by `frame` is shaped (call before prepare).
+    pub fn ensure(&mut self, text: &str, style: &TextStyle) {
+        self.shaped(text, style);
+    }
+
+    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame, phys: (u32, u32)) {
+        for l in &frame.layers {
+            for t in &l.texts {
+                self.ensure(&t.text, &t.style);
+            }
+        }
+        self.viewport.update(queue, Resolution { width: phys.0, height: phys.1 });
+        let scale = self.scale;
+        let TextSystem { fonts, swash, atlas, viewport, renderers, cache, .. } = self;
+        for (li, layer) in frame.layers.iter().enumerate() {
+            let areas: Vec<TextArea> = layer
+                .texts
+                .iter()
+                .filter_map(|t| {
+                    let shaped = cache.get(&Key::new(&t.text, &t.style))?;
+                    let c = t.color;
+                    let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    Some(TextArea {
+                        buffer: &shaped.buffer,
+                        left: (t.pos.0 * scale).round(),
+                        top: (t.pos.1 * scale).round(),
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: (t.clip.x * scale).floor() as i32,
+                            top: (t.clip.y * scale).floor() as i32,
+                            right: ((t.clip.x + t.clip.w) * scale).ceil() as i32,
+                            bottom: ((t.clip.y + t.clip.h) * scale).ceil() as i32,
+                        },
+                        default_color: Color::rgba(to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3])),
+                        custom_glyphs: &[],
+                    })
+                })
+                .collect();
+            let _ = renderers[li].prepare(device, queue, fonts, atlas, viewport, areas, swash);
+        }
+    }
+
+    pub fn render(&self, layer: usize, pass: &mut wgpu::RenderPass<'_>) {
+        let _ = self.renderers[layer].render(&self.atlas, &self.viewport, pass);
+    }
+
+    pub fn trim(&mut self) {
+        self.atlas.trim();
+    }
+}
