@@ -53,10 +53,22 @@ strings on a 24-unit grid.
   - 11 pt, name only;
   - nothing.
   Deeper cells drop one step. Stubs, and file names shortened to less than
-  70% of their length, are not drawn. Top-level folders that show their
-  contents float their name on a soft halo instead of a pill. The tooltip
-  carries the detail: icon, name, size, path, share bar, and what a click
-  opens.
+  70% of their length, are not drawn. Folders that show their contents
+  float their name on a soft halo instead of a pill. The tooltip carries the
+  detail: icon, name, size, path, share bar, and what a click opens.
+
+**Continuity through a step.** A name must not vanish or jump when the map
+zooms.
+- Folders are labelled at *every* depth, outermost first. A cell that covers
+  at least half of its nearest labelled ancestor reads as the same region
+  and is not named again. The name on screen is therefore the folder a click
+  opens next, and it keeps its label as the zoom brings it closer.
+- A click opens one level *and* selects the entry that was clicked. A scroll
+  remembers it as the *arrival*. That entry and its ancestors are labelled
+  before anything else, the selection ring marks it, and it pulses once
+  (1.1 s) when the new scope lands.
+- Going up pulses the folder just left. Both cases use
+  `ViewState::arrival`.
 
 ## Consequences
 

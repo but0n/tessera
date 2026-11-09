@@ -110,6 +110,10 @@ pub struct ViewState {
     pub toast: Option<Toast>,
     pub transition: Option<Transition>,
     pub gesture: Gesture,
+    /// The entry a scope change was about (the cell clicked, or the folder
+    /// just left), and when the new map first showed it. It keeps its label
+    /// and pulses once on arrival so the eye can follow it through the zoom.
+    pub arrival: Option<(NodeId, Option<Instant>)>,
     /// What the pointer is over in the map: (entry, scope a click enters).
     pub map_hover: Option<(NodeId, NodeId)>,
     /// Smooth tree scrolling: (from, to, start).
@@ -141,6 +145,7 @@ impl Default for ViewState {
             toast: None,
             transition: None,
             gesture: Gesture::default(),
+            arrival: None,
             map_hover: None,
             tree_glide: None,
             tree_drag: None,

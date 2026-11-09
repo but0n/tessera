@@ -30,6 +30,8 @@ const QUIET: Duration = Duration::from_millis(220);
 /// builds up, and how far the map shrinks while scrolling out.
 const LEAN_IN: f32 = 0.14;
 const LEAN_OUT: f32 = 0.05;
+/// Length of the arrival pulse (s).
+const PULSE: f32 = 1.1;
 
 /// Which part of a layout is on screen.
 #[derive(Copy, Clone)]
@@ -193,6 +195,14 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
         ui.label(map_rect, msg, theme::BODY, theme::TEXT_3, Align::Center);
         return;
     }
+    // The arrival pulse starts when the new scope is first on screen.
+    if !stale && let Some((id, start)) = view.arrival {
+        match start {
+            None => view.arrival = Some((id, Some(now))),
+            Some(t) if (now - t).as_secs_f32() > PULSE => view.arrival = None,
+            _ => ui.animating = true,
+        }
+    }
     let full = Camera::full(&layout);
     let probe = Screen::new(map_rect, full);
     let interactive = !stale && age >= FADE_DURATION;
@@ -201,7 +211,7 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
     let can_up = ctx.inv.node(view.focus).parent().is_some();
 
     // Scroll / pinch: lean toward the next level, step once it is reached.
-    let lean = if interactive { gesture(ui, view, &layout, enter, can_up, map_rect, out) } else { 0.0 };
+    let lean = if interactive { gesture(ui, view, &layout, hovered, enter, can_up, map_rect, out) } else { 0.0 };
     // Zoom from 98.5% → 100% as it fades in; also absorbs window resizes.
     let k = 1.0 + 0.015 * (1.0 - opacity as f64);
     let mut cam = Camera { x: full.w * (1.0 - k) / 2.0, y: full.h * (1.0 - k) / 2.0, w: full.w * k, h: full.h * k };
@@ -225,7 +235,8 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
 
 /// Feeds scroll and pinch into the view's gesture; returns the lean in
 /// [-1, 1] to preview. Steps fire at ±1: into `enter`, or up a level.
-fn gesture(ui: &mut Ui, view: &mut ViewState, layout: &MapLayout, enter: Option<usize>, can_up: bool, map_rect: Rect, out: &mut Vec<Action>) -> f32 {
+#[allow(clippy::too_many_arguments)]
+fn gesture(ui: &mut Ui, view: &mut ViewState, layout: &MapLayout, hovered: Option<usize>, enter: Option<usize>, can_up: bool, map_rect: Rect, out: &mut Vec<Action>) -> f32 {
     let now = Instant::now();
     let g = &mut view.gesture;
     let dt = g.last_frame.map_or(0.0, |t| (now - t).as_secs_f32().min(0.1));
@@ -273,7 +284,10 @@ fn gesture(ui: &mut Ui, view: &mut ViewState, layout: &MapLayout, enter: Option<
         g.acc = 0.0;
         g.handoff = if dir > 0.0 { LEAN_IN } else { 0.0 };
         match enter {
-            Some(sc) if dir > 0.0 => out.push(Action::Focus(layout.cells[sc].node)),
+            Some(sc) if dir > 0.0 => {
+                out.push(Action::Focus(layout.cells[sc].node));
+                view.arrival = hovered.map(|h| (layout.cells[h].node, None));
+            }
             _ => out.push(Action::FocusUp),
         }
         return dir * if dir > 0.0 { 1.0 } else { 0.0 };
@@ -430,6 +444,10 @@ struct LabelCand {
     area: f64,
     alpha: f32,
     hue: u16,
+    /// On the path to the followed entry: placed before everything else.
+    first: bool,
+    /// The followed entry itself: always named when it fits.
+    anchor: bool,
 }
 
 /// Draws the cells of `layout` through `s`. `hovered` is the cell under the
@@ -467,6 +485,17 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         };
         fam.push(h);
     }
+
+    // The entry the user is following and its ancestors: labelled first.
+    let anchor = view.arrival.map(|a| a.0).or(view.selected);
+    let chain: Vec<NodeId> = anchor.map(|a| ctx.inv.ancestors(a).collect()).unwrap_or_default();
+    let pulse = match view.arrival {
+        Some((id, Some(t))) => {
+            let age = t.elapsed().as_secs_f32();
+            Some((id, smoothstep(0.0, 0.12, age) * (1.0 - smoothstep(0.15, PULSE, age))))
+        }
+        _ => None,
+    };
 
     let mut labels: Vec<LabelCand> = Vec::new();
     let mut pts: Vec<[f32; 2]> = Vec::with_capacity(32);
@@ -545,10 +574,22 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         pts.clear();
         pts.extend(shape.pts.iter().map(|p| [p.x as f32, p.y as f32]));
         ui.cell(&pts, color, theme::RECLAIM, r as f32, flags, light, o);
+        if let Some((id, k)) = pulse
+            && id == c.node
+            && !others
+            && k > 0.0
+        {
+            ui.cell(&pts, theme::TEXT, theme::RECLAIM, r as f32, 0, 0.0, 0.3 * k * o);
+        }
 
         let label_r = shape.inradius_at_centroid() + r;
-        if o > 0.8 && label_r >= 14.0 && !others && (c.depth == 1 || !c.has_children) {
-            labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i] });
+        // Folders are labelled at every depth, outermost first: the name on
+        // screen is the folder a click opens, and it keeps its label as the
+        // zoom brings it closer.
+        if o > 0.8 && label_r >= 14.0 && !others {
+            let first = chain.contains(&c.node);
+            let anchor = Some(c.node) == anchor;
+            labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i], first, anchor });
         }
     }
     place_labels(ui, ctx, layout, labels, s.clip);
@@ -562,12 +603,29 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
     ui.layer = 1;
     cands.sort_by(|a, b| {
         let (ca, cb) = (&layout.cells[a.idx], &layout.cells[b.idx]);
-        ca.depth.cmp(&cb.depth).then(b.area.total_cmp(&a.area))
+        b.first.cmp(&a.first).then(ca.depth.cmp(&cb.depth)).then(b.area.total_cmp(&a.area))
     });
     let mut placed: Vec<Rect> = Vec::new();
+    let mut named = vec![false; layout.cells.len()];
     for cand in cands {
         let opacity = cand.alpha;
         let c: &MapCell = &layout.cells[cand.idx];
+        // A cell filling most of its nearest named ancestor reads as the
+        // same region: one name is enough (the followed entry is exempt).
+        if !cand.anchor {
+            let mut p = c.parent;
+            while let Some(pi) = p.map(|p| p as usize) {
+                if named[pi] {
+                    break;
+                }
+                p = layout.cells[pi].parent;
+            }
+            if let Some(pi) = p
+                && c.polygon.area() >= 0.5 * layout.cells[pi as usize].polygon.area()
+            {
+                continue;
+            }
+        }
         let full_name = ctx.inv.name(c.node);
         // Deeper labels step down a size so the hierarchy reads in type too.
         let room = cand.inradius as f32 * if c.depth == 1 { 1.0 } else { 0.78 };
@@ -604,7 +662,8 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         }
         if frame {
             // Over busy content: a soft dark halo, no hard pill.
-            ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, 0.5 * opacity), 16.0, 12.0);
+            let halo = if c.depth == 1 { 0.5 } else { 0.38 };
+            ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, halo * opacity), 16.0, 12.0);
         }
         let ink = if frame { theme::TEXT } else { alpha(theme::TEXT, 0.94) };
         ui.text(r.cx() - wn / 2.0, r.y, &name, style, alpha(ink, ink[3] * opacity));
@@ -612,7 +671,9 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             let size_ink = if frame { theme::branch(cand.hue) } else { alpha(theme::TEXT, 0.58) };
             ui.text(r.cx() - ws / 2.0, r.y + lh, &size, theme::MAP_NUM, alpha(size_ink, size_ink[3] * opacity));
         }
-        placed.push(r.inset(if frame { -10.0 } else { -4.0 }));
+        // Folder names claim more room, so nested ones never stack up.
+        named[cand.idx] = true;
+        placed.push(if frame { r.inset_xy(-18.0, -14.0) } else { r.inset(-4.0) });
     }
     ui.layer = 0;
 }
@@ -641,7 +702,11 @@ fn interact(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s:
                 out.push(Action::Select(c.node));
             }
         } else if enters {
+            // Open one level, and keep what was clicked selected so it
+            // stays identifiable (ring, label, pulse) in the new view.
             out.push(Action::Focus(scope.node));
+            out.push(Action::Select(c.node));
+            view.arrival = Some((c.node, None));
         } else if scope.kind == CellKind::File {
             out.push(Action::Select(scope.node));
         }

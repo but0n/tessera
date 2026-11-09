@@ -148,6 +148,10 @@ impl App {
                 (ZoomDir::Fade, id)
             };
             let now = Instant::now();
+            if dir == ZoomDir::Out {
+                // Coming back out: point at the folder just left.
+                view.arrival = Some((pivot, None));
+            }
             let pre = if dir == ZoomDir::Fade { 0.0 } else { std::mem::take(&mut view.gesture.handoff) };
             view.transition = Some(Transition { old, dir, pivot, start: (dir == ZoomDir::In).then_some(now), asked: now, pre });
         }
