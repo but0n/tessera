@@ -446,8 +446,6 @@ struct LabelCand {
     hue: u16,
     /// On the path to the followed entry: placed before everything else.
     first: bool,
-    /// The followed entry itself: always named when it fits.
-    anchor: bool,
 }
 
 /// Draws the cells of `layout` through `s`. `hovered` is the cell under the
@@ -522,15 +520,19 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
             2 => 1.1,
             _ => 0.8,
         } * zoom.min(2.0);
+        // Concentric: a child's radius is about its parent's minus the
+        // padding between them, so no corner pokes out of a rounded parent.
         let want_r = match c.depth {
-            1 => 9.0,
-            2 => 6.0,
-            _ => 4.0,
+            1 => 13.0,
+            2 => 8.5,
+            _ => 6.0,
         } * zoom.min(3.0);
         let inr = poly.inradius_at_centroid();
-        let r = want_r.min(inr * 0.4);
+        let mut r = want_r.min(inr * 0.55);
         let mut shape = poly.inset(gap + r);
         if shape.is_empty() {
+            // Too thin to round: draw it square rather than overlap.
+            r = 0.0;
             shape = poly.inset(gap * 0.5);
             if shape.is_empty() {
                 continue;
@@ -588,8 +590,7 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         // zoom brings it closer.
         if o > 0.8 && label_r >= 14.0 && !others {
             let first = chain.contains(&c.node);
-            let anchor = Some(c.node) == anchor;
-            labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i], first, anchor });
+            labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i], first });
         }
     }
     place_labels(ui, ctx, layout, labels, s.clip);
@@ -597,38 +598,58 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
 }
 
 /// Labels sized to their cell: big cells get big type and their size, small
-/// ones just a name, the smallest nothing (the tooltip has it). Top-level
-/// folders showing their contents float a name over them on a soft scrim.
+/// ones just a name, the smallest nothing (the tooltip has it).
+///
+/// A folder whose largest child covers most of it is, to the eye, that
+/// child: the folder shows only as a thin rim. Such chains get one label at
+/// the region they share. It names the cell actually seen, with the folders
+/// around it as a small path above (`bevy ›` over `target`), so neither
+/// name is lost and none is misplaced. Folders showing several children
+/// float their name on a soft halo.
 fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<LabelCand>, bounds: Rect) {
     ui.layer = 1;
     cands.sort_by(|a, b| {
         let (ca, cb) = (&layout.cells[a.idx], &layout.cells[b.idx]);
         b.first.cmp(&a.first).then(ca.depth.cmp(&cb.depth)).then(b.area.total_cmp(&a.area))
     });
-    let mut placed: Vec<Rect> = Vec::new();
-    let mut named = vec![false; layout.cells.len()];
-    for cand in cands {
-        let opacity = cand.alpha;
-        let c: &MapCell = &layout.cells[cand.idx];
-        // A cell filling most of its nearest named ancestor reads as the
-        // same region: one name is enough (the followed entry is exempt).
-        if !cand.anchor {
-            let mut p = c.parent;
-            while let Some(pi) = p.map(|p| p as usize) {
-                if named[pi] {
-                    break;
-                }
-                p = layout.cells[pi].parent;
-            }
-            if let Some(pi) = p
-                && c.polygon.area() >= 0.5 * layout.cells[pi as usize].polygon.area()
-            {
-                continue;
-            }
+    let n = layout.cells.len();
+    // Dominant child: fills its parent, which then shows only as a rim.
+    let mut dominant: Vec<Option<usize>> = vec![None; n];
+    for (i, c) in layout.cells.iter().enumerate() {
+        if let Some(p) = c.parent
+            && !matches!(c.kind, CellKind::Others { .. })
+            && c.polygon.area() >= 0.7 * layout.cells[p as usize].polygon.area()
+        {
+            dominant[p as usize] = Some(i);
         }
+    }
+    let mut absorbed = vec![false; n];
+    for d in dominant.iter().flatten() {
+        absorbed[*d] = true;
+    }
+    let mut cand_of: Vec<Option<usize>> = vec![None; n];
+    for (k, c) in cands.iter().enumerate() {
+        cand_of[c.idx] = Some(k);
+    }
+
+    let mut placed: Vec<Rect> = Vec::new();
+    for head in &cands {
+        // Chain members are labelled through their head.
+        if absorbed[head.idx] {
+            continue;
+        }
+        let mut chain = vec![head.idx];
+        while let Some(d) = dominant[*chain.last().unwrap()] {
+            chain.push(d);
+        }
+        let end = *chain.last().unwrap();
+        let cand = cand_of[end].map_or(head, |k| &cands[k]);
+        let opacity = head.alpha.min(cand.alpha);
+        let c: &MapCell = &layout.cells[end];
+        let top = &layout.cells[head.idx];
         let full_name = ctx.inv.name(c.node);
         // Deeper labels step down a size so the hierarchy reads in type too.
-        let room = cand.inradius as f32 * if c.depth == 1 { 1.0 } else { 0.78 };
+        let room = cand.inradius as f32 * if top.depth == 1 { 1.0 } else { 0.78 };
         let (style, with_size) = if room >= 68.0 {
             (theme::MAP_L, true)
         } else if room >= 38.0 {
@@ -639,7 +660,7 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             continue;
         };
         let (cx, cy) = (cand.center.x as f32, cand.center.y as f32);
-        let frame = c.has_children;
+        let frame = c.has_children || chain.len() > 1;
         let max_w = cand.inradius as f32 * if frame { 2.4 } else { 1.8 };
         let name = ui.text.elide(full_name, &style, max_w);
         // A label cut down to a stub says nothing; leave the cell bare
@@ -648,12 +669,19 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         if name.ends_with('…') && (kept < total.min(6) || (!frame && c.kind == CellKind::File && (kept as f32) < total as f32 * 0.7)) {
             continue;
         }
+        // The folders this cell fills, outermost first.
+        let path = (chain.len() > 1 && room >= 30.0).then(|| {
+            let names: Vec<&str> = chain[..chain.len() - 1].iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
+            ui.text.elide(&format!("{} ›", names.join(" › ")), &theme::MAP_PATH, max_w)
+        });
         let wn = ui.measure(&name, style);
+        let wp = path.as_ref().map_or(0.0, |p| ui.measure(p, theme::MAP_PATH));
         let size = ByteSize(c.size).to_string();
         let ws = if with_size { ui.measure(&size, theme::MAP_NUM) } else { 0.0 };
         let lh = style.line_height();
-        let h = if with_size { lh + 14.0 } else { lh };
-        let w = wn.max(ws);
+        let ph = if path.is_some() { theme::MAP_PATH.line_height() } else { 0.0 };
+        let h = ph + if with_size { lh + 14.0 } else { lh };
+        let w = wn.max(ws).max(wp);
         let x = (cx - w / 2.0).clamp(bounds.x + 8.0, (bounds.right() - w - 8.0).max(bounds.x + 8.0));
         let y = (cy - h / 2.0).clamp(bounds.y + 6.0, bounds.bottom() - h - 6.0);
         let r = Rect::new(x, y, w, h);
@@ -662,17 +690,23 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         }
         if frame {
             // Over busy content: a soft dark halo, no hard pill.
-            let halo = if c.depth == 1 { 0.5 } else { 0.38 };
+            let halo = if c.has_children { if top.depth == 1 { 0.5 } else { 0.38 } } else { 0.28 };
             ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, halo * opacity), 16.0, 12.0);
         }
+        let mut y = r.y;
+        if let Some(p) = &path {
+            // A top-level folder keeps its family colour in the path.
+            let ink = if top.depth == 1 { theme::branch(head.hue) } else { alpha(theme::TEXT, 0.62) };
+            ui.text(r.cx() - wp / 2.0, y, p, theme::MAP_PATH, alpha(ink, ink[3] * opacity));
+            y += ph;
+        }
         let ink = if frame { theme::TEXT } else { alpha(theme::TEXT, 0.94) };
-        ui.text(r.cx() - wn / 2.0, r.y, &name, style, alpha(ink, ink[3] * opacity));
+        ui.text(r.cx() - wn / 2.0, y, &name, style, alpha(ink, ink[3] * opacity));
         if with_size {
-            let size_ink = if frame { theme::branch(cand.hue) } else { alpha(theme::TEXT, 0.58) };
-            ui.text(r.cx() - ws / 2.0, r.y + lh, &size, theme::MAP_NUM, alpha(size_ink, size_ink[3] * opacity));
+            let size_ink = if c.has_children { theme::branch(cand.hue) } else { alpha(theme::TEXT, 0.58) };
+            ui.text(r.cx() - ws / 2.0, y + lh, &size, theme::MAP_NUM, alpha(size_ink, size_ink[3] * opacity));
         }
         // Folder names claim more room, so nested ones never stack up.
-        named[cand.idx] = true;
         placed.push(if frame { r.inset_xy(-18.0, -14.0) } else { r.inset(-4.0) });
     }
     ui.layer = 0;

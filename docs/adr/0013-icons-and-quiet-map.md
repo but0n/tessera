@@ -42,9 +42,12 @@ strings on a 24-unit grid.
 - At most three levels are shown: `MapParams::max_depth` drops from 4 to 3,
   and the thresholds for minimum cell size and recursion go up. The next
   level is one scroll away (ADR-0012).
-- Cells are soft "pebbles": corner radius scales with depth and zoom, the
-  grout narrows with depth, and the light comes from above with a top-edge
-  bevel (`fs_cell`).
+- Cells are soft "pebbles". The corner radius is about 13 / 8.5 / 6 pt by
+  depth, scaled with zoom and capped at 55% of the inradius. The radii are
+  concentric: a child's radius is its parent's minus the padding, so no
+  child corner pokes out of a rounded parent. Cells too thin to round are
+  drawn square rather than overlapping. The grout narrows with depth, and
+  the light comes from above with a top-edge bevel (`fs_cell`).
 - *Small items* cells carry a fine dot texture and a muted folder tone, and
   inherit the mark state of their folder.
 - **Labels are sized by room.** A cell's inradius picks the style:
@@ -59,10 +62,16 @@ strings on a 24-unit grid.
 
 **Continuity through a step.** A name must not vanish or jump when the map
 zooms.
-- Folders are labelled at *every* depth, outermost first. A cell that covers
-  at least half of its nearest labelled ancestor reads as the same region
-  and is not named again. The name on screen is therefore the folder a click
-  opens next, and it keeps its label as the zoom brings it closer.
+- Folders are labelled at *every* depth, outermost first, so the name on
+  screen is the folder a click opens next, and it keeps its label as the
+  zoom brings it closer.
+- **Chains.** When a folder's largest child fills at least 70% of it, the
+  folder shows only as a thin rim, and to the eye the region *is* the child.
+  The whole chain gets one label at the child: the main line names the cell
+  actually seen (`target 45.1 GB`), and a small path above it names the
+  folders around it (`bevy ›`). A top-level folder in that path keeps its
+  family colour. This avoids both failure modes: a parent's name printed
+  over its child, and a child's name hidden behind its parent's.
 - A click opens one level *and* selects the entry that was clicked. A scroll
   remembers it as the *arrival*. That entry and its ancestors are labelled
   before anything else, the selection ring marks it, and it pulses once
