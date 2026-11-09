@@ -17,16 +17,18 @@ for removal and then move them to the Trash in one confirmed step.
   while the scan runs.
 - **Voronoi treemap**: power diagrams following Nocaj–Brandes. Each level is
   solved in parallel and reuses the previous layout as its starting point, so
-  live updates morph smoothly. Click anywhere to open that region one level
-  deeper. The old map dives into the cell while the new one grows out of it,
-  and Esc pulls back out.
+  live updates morph smoothly. Click or scroll to open a region one level
+  deeper. The old map dives into the cell while the new one grows out of it.
+  Scrolling back or pressing Esc pulls back out. Labels scale with the room
+  their cell has, so the map labels itself.
 - **Context everywhere**: colours follow the hierarchy, so the tree and the map
   always agree. The tree pins the ancestors of what you are looking at, lights
   the indent guide around the selection, and shows the map's current scope
   as a band.
 - **GPU UI**: winit + wgpu + glyphon. Shapes are drawn as exact SDF rounded
-  rects and convex polygons, there are three draw layers, and nothing redraws
-  while idle (0% CPU).
+  rects and convex polygons. The icons are our own vector paths, rasterised
+  into the glyph atlas. There are three draw layers, and nothing redraws while
+  idle (0% CPU).
 - **Safe by design**: marking only builds a plan, regenerable content is
   pointed out but never marked for you, items only go to the Trash, and
   privacy-protected folders are skipped instead of triggering OS prompts.
@@ -42,7 +44,8 @@ cargo run --release -- --sample --snapshot out.png --view map   # headless PNG
 
 | Input | Action |
 |-------|--------|
-| Click in the map | open that region one level deeper (zoom) |
+| Click, scroll up or pinch out in the map | open that region one level deeper (zoom) |
+| Scroll down or pinch in in the map | up one level |
 | ⌥-click in the map | select the exact entry |
 | Click / ↑↓←→ / PgUp PgDn / Home End | select and navigate the tree |
 | Double-click a folder in the tree, Enter | show it in the map |

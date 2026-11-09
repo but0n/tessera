@@ -70,7 +70,7 @@ pub enum Tone {
     /// A folder too small to show contents.
     Folder,
     File,
-    /// "Small items" aggregate.
+    /// "Small items" aggregate: a muted folder tone (it is drawn dotted).
     Rest,
 }
 
@@ -86,7 +86,7 @@ pub fn tone(branch: u16, t: Tone, rank: u16) -> Rgba {
         }
         Tone::Folder => (0.475 - j, 0.066),
         Tone::File => (0.56 - j, 0.078),
-        Tone::Rest => (0.235, 0.012),
+        Tone::Rest => (0.36, 0.028),
     };
     oklch(l, c, h)
 }
@@ -153,10 +153,19 @@ pub const SMALL: TextStyle = TextStyle::new(11.5, 400, Font::Sans);
 pub const SMALL_STRONG: TextStyle = TextStyle::new(11.5, 600, Font::Sans);
 pub const CAPTION: TextStyle = TextStyle::new(10.5, 600, Font::Sans);
 pub const NUM: TextStyle = TextStyle::new(12.0, 500, Font::Num);
+pub const NUM_STRONG: TextStyle = TextStyle::new(13.0, 600, Font::Num);
 pub const NUM_BIG: TextStyle = TextStyle::new(20.0, 600, Font::Num);
 pub const MONO: TextStyle = TextStyle::new(11.0, 400, Font::Mono);
 
+// Map labels: larger cells get larger type.
+pub const MAP_L: TextStyle = TextStyle::new(15.0, 600, Font::Sans);
+pub const MAP_M: TextStyle = TextStyle::new(12.5, 600, Font::Sans);
+pub const MAP_S: TextStyle = TextStyle::new(11.0, 560, Font::Sans);
+pub const MAP_NUM: TextStyle = TextStyle::new(11.0, 500, Font::Num);
+
 // Metrics.
+/// Default icon size (points); icons sit on a 24-unit grid.
+pub const ICON: f32 = 15.0;
 pub const TOPBAR_H: f32 = 52.0;
 pub const FOOTER_H: f32 = 28.0;
 pub const SIDEBAR_W: f32 = 318.0;

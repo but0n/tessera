@@ -148,8 +148,10 @@ impl App {
                 (ZoomDir::Fade, id)
             };
             let now = Instant::now();
-            view.transition = Some(Transition { old, dir, pivot, start: (dir == ZoomDir::In).then_some(now), asked: now });
+            let pre = if dir == ZoomDir::Fade { 0.0 } else { std::mem::take(&mut view.gesture.handoff) };
+            view.transition = Some(Transition { old, dir, pivot, start: (dir == ZoomDir::In).then_some(now), asked: now, pre });
         }
+        view.gesture.handoff = 0.0;
         view.focus = id;
         view.selected = Some(id);
         drop(inv);
@@ -347,7 +349,10 @@ impl ApplicationHandler<Wake> for App {
             },
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x * 36.0, y * 36.0),
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        self.input.wheel_notch = true;
+                        (x * 36.0, y * 36.0)
+                    }
                     MouseScrollDelta::PixelDelta(p) => {
                         let l = p.to_logical::<f32>(scale);
                         (l.x, l.y)
@@ -356,6 +361,7 @@ impl ApplicationHandler<Wake> for App {
                 self.input.wheel.0 += dx;
                 self.input.wheel.1 += dy;
             }
+            WindowEvent::PinchGesture { delta, .. } => self.input.pinch += delta as f32,
             WindowEvent::ModifiersChanged(m) => self.input.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.input.keys.push(event.logical_key.clone());

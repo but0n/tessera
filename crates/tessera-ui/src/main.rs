@@ -25,7 +25,7 @@ use winit::event_loop::EventLoop;
 
 use crate::state::Tab;
 
-const USAGE: &str = "usage: tessera [PATH | --sample] [--snapshot OUT.png [--view overview|map] [--size WxH] [--scale S] [--focus NAME] [--hover X,Y] [--select REL/PATH] [--click X,Y [--after MS]] [--demo]]";
+const USAGE: &str = "usage: tessera [PATH | --sample] [--snapshot OUT.png [--view overview|map] [--size WxH] [--scale S] [--focus NAME] [--hover X,Y] [--select REL/PATH] [--click X,Y | --scroll X,Y,DY [--after MS]] [--demo]]";
 
 fn main() {
     let mut root: Option<PathBuf> = None;
@@ -44,6 +44,7 @@ fn main() {
         after_ms: 0,
         select: None,
         tree_scroll: 0.0,
+        scroll: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -74,6 +75,11 @@ fn main() {
             "--demo" => opts.demo = true,
             "--sample" => sample = true,
             "--select" => opts.select = args.next(),
+            "--scroll" => {
+                let s = args.next().expect(USAGE);
+                let v: Vec<f32> = s.split(',').map(|x| x.parse().expect(USAGE)).collect();
+                opts.scroll = Some((v[0], v[1], v[2]));
+            }
             "--tree-scroll" => opts.tree_scroll = args.next().expect(USAGE).parse().expect(USAGE),
             p => root = Some(PathBuf::from(p)),
         }

@@ -2121,6 +2121,7 @@ dependencies = [
  "tessera-domain",
  "tessera-infra",
  "tessera-voronoi",
+ "tiny-skia",
  "wgpu",
  "winit",
 ]

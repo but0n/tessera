@@ -1,8 +1,9 @@
 //! Reusable controls. All take a rect and return what happened.
 
-use tessera_domain::ByteSize;
 use tessera_domain::size::group_digits;
+use tessera_domain::{ByteSize, Category, EntryKind, Node};
 
+use crate::gfx::icons::Icon;
 use crate::gfx::text::TextStyle;
 use crate::theme::{self, Rgba, alpha, mix};
 use crate::ui::{Align, Rect, Ui};
@@ -17,6 +18,11 @@ pub enum ButtonKind {
 }
 
 pub fn button(ui: &mut Ui, r: Rect, label: &str, kind: ButtonKind, enabled: bool) -> bool {
+    button_icon(ui, r, None, label, kind, enabled)
+}
+
+/// Button with a leading icon; the pair is centred as one unit.
+pub fn button_icon(ui: &mut Ui, r: Rect, icon: Option<Icon>, label: &str, kind: ButtonKind, enabled: bool) -> bool {
     let (hover, click) = if enabled { ui.interact(r) } else { (false, false) };
     let (fill, border, ink) = match kind {
         ButtonKind::Reclaim if enabled => (if hover { mix(theme::RECLAIM, theme::TEXT, 0.12) } else { theme::RECLAIM }, theme::RECLAIM, theme::ON_RECLAIM),
@@ -25,22 +31,78 @@ pub fn button(ui: &mut Ui, r: Rect, label: &str, kind: ButtonKind, enabled: bool
         ButtonKind::Secondary => (if hover { theme::HOVER } else { theme::RAISED }, theme::LINE, if enabled { theme::TEXT } else { theme::TEXT_3 }),
     };
     ui.rect_border(r, fill, border, if kind == ButtonKind::Reclaim { 0.0 } else { 1.0 }, theme::RADIUS_SM + 1.0);
-    ui.label(r.inset_xy(10.0, 0.0), label, theme::BODY_STRONG, ink, Align::Center);
+    let Some(icon) = icon else {
+        ui.label(r.inset_xy(10.0, 0.0), label, theme::BODY_STRONG, ink, Align::Center);
+        return click;
+    };
+    let size = theme::ICON;
+    let w = (ui.measure(label, theme::BODY_STRONG) + size + 7.0).min(r.w - 20.0);
+    let x = r.cx() - w / 2.0;
+    ui.icon(x, r.cy() - size / 2.0, size, icon, ink);
+    ui.label(Rect::new(x + size + 7.0, r.y, w - size - 7.0, r.h), label, theme::BODY_STRONG, ink, Align::Start);
     click
 }
 
-/// Small square button with a single glyph.
-pub fn icon_button(ui: &mut Ui, r: Rect, glyph: &str, tip_active: bool) -> bool {
-    let (hover, click) = ui.interact(r);
-    if hover || tip_active {
+/// Square, borderless button holding one icon; `tip` names it on hover.
+pub fn icon_button(ui: &mut Ui, r: Rect, icon: Icon, tip_text: &str, enabled: bool) -> bool {
+    let (hover, click) = if enabled { ui.interact(r) } else { (false, false) };
+    if hover {
         ui.rect(r, theme::HOVER, theme::RADIUS_SM);
     }
-    ui.label(r, glyph, theme::BODY, if hover { theme::TEXT } else { theme::TEXT_2 }, Align::Center);
+    let ink = if !enabled {
+        alpha(theme::TEXT_3, 0.5)
+    } else if hover {
+        theme::TEXT
+    } else {
+        theme::TEXT_2
+    };
+    ui.icon_in(r, theme::ICON, icon, ink);
+    if hover && !tip_text.is_empty() {
+        tip(ui, r, tip_text);
+    }
     click
+}
+
+/// Small label under `anchor`, naming an icon-only control.
+pub fn tip(ui: &mut Ui, anchor: Rect, text: &str) {
+    let layer = std::mem::replace(&mut ui.layer, 2);
+    let w = ui.measure(text, theme::SMALL) + 16.0;
+    let screen = ui.screen();
+    let x = (anchor.cx() - w / 2.0).clamp(screen.x + 6.0, screen.right() - w - 6.0);
+    let r = Rect::new(x, anchor.bottom() + 6.0, w, 22.0);
+    ui.shadow(r, alpha(theme::BG, 0.6), theme::RADIUS_SM, 8.0);
+    ui.rect_border(r, theme::RAISED, theme::LINE, 1.0, theme::RADIUS_SM);
+    ui.label(r, text, theme::SMALL, theme::TEXT, Align::Center);
+    ui.layer = layer;
+}
+
+/// The icon for an entry: its kind, or for files its content category.
+pub fn kind_icon(n: &Node) -> Icon {
+    match n.kind() {
+        EntryKind::Dir => Icon::FolderFill,
+        EntryKind::Symlink => Icon::Link,
+        EntryKind::Other => Icon::File,
+        EntryKind::File => category_icon(n.category()),
+    }
+}
+
+pub fn category_icon(c: Category) -> Icon {
+    match c {
+        Category::Video => Icon::Video,
+        Category::Image => Icon::Image,
+        Category::Audio => Icon::Audio,
+        Category::Archive => Icon::Archive,
+        Category::Code => Icon::Code,
+        Category::Document => Icon::Document,
+        Category::Data => Icon::Data,
+        Category::Binary => Icon::Package,
+        Category::Folder => Icon::FolderFill,
+        Category::Other => Icon::File,
+    }
 }
 
 /// Segmented control; returns the index clicked.
-pub fn segmented(ui: &mut Ui, r: Rect, options: &[&str], selected: usize) -> Option<usize> {
+pub fn segmented(ui: &mut Ui, r: Rect, options: &[(Icon, &str)], selected: usize) -> Option<usize> {
     ui.rect_border(r, theme::PANEL, theme::LINE, 1.0, theme::RADIUS_SM + 2.0);
     let w = r.w / options.len() as f32;
     let mut out = None;
@@ -53,7 +115,13 @@ pub fn segmented(ui: &mut Ui, r: Rect, options: &[&str], selected: usize) -> Opt
         } else if hover {
             ui.rect(cell, alpha(theme::HOVER, 0.5), theme::RADIUS_SM);
         }
-        ui.label(cell, o, theme::SMALL_STRONG, if i == selected { theme::TEXT } else { theme::TEXT_2 }, Align::Center);
+        let (icon, label) = *o;
+        let ink = if i == selected { theme::TEXT } else { theme::TEXT_2 };
+        let size = 14.0;
+        let w = ui.measure(label, theme::SMALL_STRONG) + size + 6.0;
+        let x = cell.cx() - w / 2.0;
+        ui.icon(x, cell.cy() - size / 2.0, size, icon, if i == selected { theme::ACCENT } else { ink });
+        ui.text(x + size + 6.0, cell.cy() - theme::SMALL_STRONG.line_height() / 2.0, label, theme::SMALL_STRONG, ink);
         if click {
             out = Some(i);
         }
@@ -71,7 +139,7 @@ pub fn mark_toggle(ui: &mut Ui, r: Rect, marked: bool, covered: bool, visible: b
     let c = Rect::new(r.cx() - d / 2.0, r.cy() - d / 2.0, d, d);
     if marked {
         ui.rect(c, theme::RECLAIM, d / 2.0);
-        ui.label(c, "✓", theme::CAPTION, theme::ON_RECLAIM, Align::Center);
+        ui.icon_in(c, d - 4.0, Icon::Check, theme::ON_RECLAIM);
     } else if covered {
         ui.rect_border(c, alpha(theme::RECLAIM, 0.15), alpha(theme::RECLAIM, 0.6), 1.0, d / 2.0);
     } else {
@@ -92,13 +160,6 @@ pub fn badge(ui: &mut Ui, x: f32, cy: f32, text: &str, color: Rgba) -> f32 {
     ui.rect(r, alpha(color, 0.14), 9.0);
     ui.label(r, text, theme::CAPTION, color, Align::Center);
     w
-}
-
-/// Folder glyph: a tab over a body. Deliberately unlike the round mark
-/// toggle so it never reads as a checkbox.
-pub fn folder(ui: &mut Ui, x: f32, cy: f32, color: Rgba) {
-    ui.rect(Rect::new(x, cy - 5.5, 6.0, 3.0), alpha(color, 0.9), 1.2);
-    ui.rect(Rect::new(x, cy - 3.5, 13.0, 9.0), alpha(color, 0.9), 2.2);
 }
 
 pub fn dot(ui: &mut Ui, cx: f32, cy: f32, d: f32, color: Rgba) {

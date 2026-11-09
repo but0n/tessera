@@ -126,6 +126,7 @@ struct CellOut {
     @location(3) @interpolate(flat) range: vec2<u32>,
     @location(4) @interpolate(flat) params: vec4<f32>,
     @location(5) @interpolate(flat) clip: vec4<f32>,
+    @location(6) @interpolate(flat) bbox: vec4<f32>,
 };
 
 const F_HOVER: u32 = 1u;
@@ -133,6 +134,7 @@ const F_SELECTED: u32 = 2u;
 const F_MARKED: u32 = 4u;
 const F_COVERED: u32 = 8u;
 const F_SCOPE: u32 = 16u;
+const F_OTHERS: u32 = 32u;
 
 @vertex
 fn vs_cell(@builtin(vertex_index) vi: u32, c: CellIn) -> CellOut {
@@ -148,6 +150,7 @@ fn vs_cell(@builtin(vertex_index) vi: u32, c: CellIn) -> CellOut {
     o.range = c.range;
     o.params = c.params;
     o.clip = c.clip;
+    o.bbox = c.bbox;
     return o;
 }
 
@@ -160,6 +163,7 @@ fn fs_cell(i: CellOut) -> @location(0) vec4<f32> {
     let start = i.range.x;
     let n = i.range.y;
     var d2 = 1e30;
+    var qn = vec2<f32>(0.0, 1.0);
     var inside = true;
     var a = verts[start + n - 1u];
     for (var k = 0u; k < n; k = k + 1u) {
@@ -168,26 +172,45 @@ fn fs_cell(i: CellOut) -> @location(0) vec4<f32> {
         let w = i.p - a;
         let t = clamp(dot(w, e) / max(dot(e, e), 1e-6), 0.0, 1.0);
         let q = w - e * t;
-        d2 = min(d2, dot(q, q));
+        let qq = dot(q, q);
+        if qq < d2 {
+            d2 = qq;
+            qn = q;
+        }
         if e.x * w.y - e.y * w.x < 0.0 {
             inside = false;
         }
         a = b;
     }
-    let d = select(1.0, -1.0, inside) * sqrt(d2) - i.params.x;
+    let dist = sqrt(d2);
+    let d = select(1.0, -1.0, inside) * dist - i.params.x;
     let aa = 0.7 / g.scale;
     let cov = 1.0 - smoothstep(-aa, aa, d);
     if cov <= 0.0 {
         discard;
     }
+    // Outward normal of the nearest edge (radial around rounded corners).
+    let nrm = select(qn, -qn, inside) / max(dist, 1e-4);
     let flags = u32(i.params.y + 0.5);
+    let light = i.params.z;
     var rgb = i.color.rgb;
-    // Soft "pillow" shading: rims slightly darker than the core, which
-    // reads as a cell membrane rather than a flat tile.
-    let inner = smoothstep(0.0, 1.0, clamp(-d / 26.0, 0.0, 1.0));
-    rgb = rgb * (0.80 + 0.24 * inner);
-    let rim = 1.0 - smoothstep(0.0, 1.6, -d);
-    rgb = mix(rgb, vec3<f32>(1.0), rim * 0.14 * i.params.z);
+    // Lit from above: a gentle top-to-bottom falloff across the cell, and a
+    // faint cushion toward the rim so cells read as soft pebbles.
+    let v = clamp((i.p.y - i.bbox.y) / max(i.bbox.w - i.bbox.y, 1.0), 0.0, 1.0);
+    rgb = rgb * (1.045 - 0.09 * v);
+    let inner = smoothstep(0.0, 1.0, clamp(-d / 22.0, 0.0, 1.0));
+    rgb = rgb * (0.90 + 0.10 * inner);
+    // Bevel: rims facing up catch the light, rims facing down sit in shade.
+    let rim = 1.0 - smoothstep(0.0, 1.4, -d);
+    let up = -nrm.y;
+    rgb = mix(rgb, vec3<f32>(1.0), rim * max(up, 0.0) * 0.20 * light);
+    rgb = rgb * (1.0 - rim * max(-up, 0.0) * 0.22 * light);
+    // Small items: a fine dot grid, "many things too small to draw".
+    if (flags & F_OTHERS) != 0u {
+        let gp = i.p - floor(i.p / 6.0) * 6.0 - vec2<f32>(3.0);
+        let dotm = 1.0 - smoothstep(0.85 - aa, 0.85 + aa, length(gp));
+        rgb = mix(rgb, vec3<f32>(1.0), dotm * 0.13);
+    }
     if (flags & (F_MARKED | F_COVERED)) != 0u {
         let s = step(0.5, fract((i.p.x - i.p.y) / 7.0));
         let k = select(0.38, 0.62, (flags & F_MARKED) != 0u);
@@ -195,17 +218,17 @@ fn fs_cell(i: CellOut) -> @location(0) vec4<f32> {
         rgb = mix(rgb, i.accent.rgb, s * k);
     }
     if (flags & F_HOVER) != 0u {
-        rgb = mix(rgb, vec3<f32>(1.0), 0.12);
+        rgb = mix(rgb, vec3<f32>(1.0), 0.10);
     }
     // Scope: the folder a click would enter. Lifted, with a bright edge.
     if (flags & F_SCOPE) != 0u {
-        rgb = mix(rgb, vec3<f32>(1.0), 0.06);
+        rgb = mix(rgb, vec3<f32>(1.0), 0.05);
         let edge = 1.0 - smoothstep(0.0, 1.0 + 2.0 * aa, -d);
-        rgb = mix(rgb, vec3<f32>(1.0), edge * 0.32);
+        rgb = mix(rgb, vec3<f32>(1.0), edge * 0.38);
     }
     if (flags & F_SELECTED) != 0u {
-        let ring = 1.0 - smoothstep(0.6, 0.6 + 2.0 * aa, abs(d + 1.4));
-        rgb = mix(rgb, vec3<f32>(1.0), ring);
+        let ring = 1.0 - smoothstep(0.7, 0.7 + 2.0 * aa, abs(d + 1.6));
+        rgb = mix(rgb, vec3<f32>(1.0), ring * 0.95);
     }
     let alpha = i.color.a * i.params.w * cov;
     return vec4<f32>(rgb * alpha, alpha);

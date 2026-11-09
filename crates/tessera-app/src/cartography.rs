@@ -89,7 +89,7 @@ pub struct MapParams {
 
 impl Default for MapParams {
     fn default() -> Self {
-        MapParams { max_depth: 4, min_cell_area: 48.0, recurse_area: 2200.0, max_children: 64 }
+        MapParams { max_depth: 3, min_cell_area: 64.0, recurse_area: 3200.0, max_children: 64 }
     }
 }
 
@@ -203,7 +203,7 @@ impl Solver<'_> {
         let values: Vec<f64> = snaps.iter().map(|s| s.size as f64).collect();
         let keys: Vec<Key> = snaps.iter().map(|s| s.key).collect();
         let init = self.warm.lookup(parent, container, &keys);
-        let settings = if depth == 1 { Settings { max_iterations: 120, convergence: 0.008 } } else { Settings { max_iterations: 60, convergence: 0.02 } };
+        let settings = if depth == 1 { Settings { max_iterations: 120, convergence: 0.008 } } else { Settings { max_iterations: 90, convergence: 0.015 } };
         let sol = tessera_voronoi::solve(container, &values, init.as_deref(), parent.0 as u64, &settings);
         let (min, max) = container.bbox();
         self.next_warm.lock().0.insert(parent, WarmEntry { min, max, keys, sites: sol.sites.clone() });

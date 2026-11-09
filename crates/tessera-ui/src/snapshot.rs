@@ -32,6 +32,8 @@ pub struct Options {
     pub select: Option<String>,
     /// Scroll the tree by this many pixels after revealing.
     pub tree_scroll: f32,
+    /// Scroll the map at (x, y) by dy points, spread over a few frames.
+    pub scroll: Option<(f32, f32, f32)>,
 }
 
 pub fn run(ws: Workspace, carto: Cartographer, opts: Options) {
@@ -148,6 +150,33 @@ pub fn run(ws: Workspace, carto: Cartographer, opts: Options) {
         if let Some(tr) = &app.view.transition {
             let t = tr.start.map_or(0.0, |s| s.elapsed().as_secs_f32() / crate::state::ZOOM_DURATION);
             eprintln!("transition {:?} at t={t:.2}", tr.dir);
+        }
+    }
+    if let Some((x, y, dy)) = opts.scroll {
+        let scrolled = Instant::now();
+        input.mouse = (x, y);
+        input.inside = true;
+        frame(&mut app, &input, &mut renderer);
+        let steps = 6;
+        for _ in 0..steps {
+            input.wheel.1 = dy / steps as f32;
+            out = frame(&mut app, &input, &mut renderer);
+            input.end_frame();
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        if app.view.transition.is_some() {
+            frame(&mut app, &input, &mut renderer);
+            eprintln!("relayout: {:.2?}", settle(&app));
+            frame(&mut app, &input, &mut renderer);
+            let wait = Duration::from_millis(opts.after_ms).saturating_sub(scrolled.elapsed());
+            std::thread::sleep(wait);
+            out = frame(&mut app, &input, &mut renderer);
+            if let Some(tr) = &app.view.transition {
+                let t = tr.start.map_or(0.0, |s| s.elapsed().as_secs_f32() / crate::state::ZOOM_DURATION);
+                eprintln!("transition {:?} at t={t:.2} (pre {:.2})", tr.dir, tr.pre);
+            }
+        } else {
+            eprintln!("lean: {:.2}", app.view.gesture.acc);
         }
     }
     let frame = out;

@@ -16,6 +16,8 @@ Read `docs/adr/README.md` and `docs/domain/` before changing structure.
 - **Never block on TCC** (ADR-0009): don't add code that opens protected paths.
 - Use the terms in `docs/domain/ubiquitous-language.md`.
 - Colours are defined in OKLCH (ADR-0011); map hues come from `ViewState::family`.
+- Icons come from `gfx::icons` (ADR-0013). Add new ones as path strings on the
+  24-unit grid, and prefer an icon or the layout over a new text label.
 - Significant decisions get a new ADR (template `docs/adr/0000-template.md`).
 
 ## Checks
@@ -29,4 +31,7 @@ cargo clippy --workspace --release --all-targets   # must be warning-free
 cargo run --release -- --sample --snapshot /tmp/map.png --view map --demo
 # Interaction: replay a click and capture mid-transition
 cargo run --release -- --sample --snapshot /tmp/t.png --view map --click 900,500 --after 200
+cargo run --release -- --sample --snapshot /tmp/s.png --view map --scroll 900,500,160 --after 200
+# Icon contact sheet
+TESSERA_ICON_SHEET=/tmp/icons.png cargo test --release -p tessera-ui icon_sheet -- --ignored
 ```

@@ -21,3 +21,4 @@ bytemuck.workspace = true
 parking_lot.workspace = true
 rfd.workspace = true
 png.workspace = true
+tiny-skia.workspace = true

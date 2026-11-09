@@ -7,10 +7,11 @@
 
 use std::time::Instant;
 
-use tessera_domain::{EntryKind, NodeId};
+use tessera_domain::NodeId;
 
 use super::widgets;
 use super::{Ctx, panel_header};
+use crate::gfx::icons::Icon;
 use crate::state::{Action, Tab, ViewState};
 use crate::theme::{self, alpha};
 use crate::ui::{Align, Rect, Ui, ease_out};
@@ -79,10 +80,11 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
     ui.rect(area, theme::PANEL, 0.0);
     ui.rect(Rect::new(area.right() - 1.0, area.y, 1.0, area.h), theme::LINE_SOFT, 0.0);
     let mut a = area;
+    // Where the scan lives; the tree below says the rest.
     let head = panel_header(&mut a);
-    widgets::caption(ui, head.x, head.cy() - 12.0, "Explorer", theme::TEXT_3);
+    ui.icon(head.x, head.cy() - 7.5, 15.0, Icon::Drive, theme::TEXT_3);
     let root = display_path(&ctx.inv.root_path().to_string_lossy());
-    ui.label(Rect::new(head.x, head.cy(), head.w, 14.0), &root, theme::MONO, theme::TEXT_3, Align::Start);
+    ui.label(Rect::new(head.x + 23.0, head.y, head.w - 23.0, head.h), &root, theme::MONO, theme::TEXT_2, Align::Start);
 
     let list = a.inset_xy(6.0, 0.0);
     let rows = flatten(ctx, view);
@@ -268,17 +270,16 @@ fn row(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, rc: &RowCtx, id: NodeId, de
     if n.is_dir() && (n.child_count() > 0 || !n.is_scanned()) {
         let open = view.expanded.contains(&id);
         let (h, click) = ui.interact(chev);
-        ui.label(chev, if open { "▾" } else { "▸" }, theme::SMALL, if h { theme::TEXT } else { theme::TEXT_3 }, Align::Center);
+        ui.icon_in(chev, 12.0, if open { Icon::ChevronDown } else { Icon::ChevronRight }, if h { theme::TEXT } else { theme::TEXT_3 });
         if click {
             out.push(Action::ToggleExpand(id));
         }
     }
-    let icon = c.take_left(18.0);
-    let icon_tint = if outside { alpha(tint, 0.45) } else { tint };
-    match n.kind() {
-        EntryKind::Dir => widgets::folder(ui, icon.x + 1.0, icon.cy(), icon_tint),
-        _ => widgets::dot(ui, icon.x + 7.5, icon.cy(), 6.0, if outside { alpha(theme::category(n.category()), 0.45) } else { theme::category(n.category()) }),
-    }
+    let icon = c.take_left(21.0);
+    // Folders wear their family colour; files their content's, quieter.
+    let icon_tint = if n.is_dir() { tint } else { theme::mix(theme::category(n.category()), theme::TEXT_3, 0.25) };
+    let icon_tint = if outside { alpha(icon_tint, 0.45) } else { icon_tint };
+    ui.icon(icon.x, icon.cy() - 7.5, 15.0, widgets::kind_icon(n), icon_tint);
 
     let toggle = c.take_right(24.0);
     let size = c.take_right(72.0);
@@ -307,25 +308,27 @@ fn row(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, rc: &RowCtx, id: NodeId, de
     }
     let mut name = c;
     name.take_right(8.0);
+    // Why a folder has no size: a glyph, named on hover.
     let flag = if n.is_protected() {
-        Some("protected")
+        Some((Icon::Lock, "Privacy-protected: not scanned"))
     } else if n.is_failed() {
-        Some("unreadable")
+        Some((Icon::Alert, "Unreadable: permission denied"))
     } else if n.is_boundary() {
-        Some("other volume")
+        Some((Icon::Drive, "Another volume: not followed"))
     } else {
         None
     };
-    if let Some(f) = flag {
-        let fw = ui.measure(f, theme::CAPTION) + 14.0;
-        let fr = name.take_right(fw);
-        widgets::badge(ui, fr.x, fr.cy(), f, theme::TEXT_3);
+    if let Some((glyph, why)) = flag {
+        let fr = name.take_right(20.0);
+        ui.icon_in(fr, 13.0, glyph, theme::TEXT_3);
+        if ui.hovered(fr) {
+            widgets::tip(ui, fr, why);
+        }
     }
-    // The map scope carries a small "on the map" marker.
+    // The map scope carries the map glyph.
     if rc.map && id == view.focus {
-        let mw = 8.0;
-        let m = name.take_right(mw + 8.0);
-        ui.rect(Rect::new(m.x + 4.0, m.cy() - mw / 2.0, mw, mw), alpha(theme::ACCENT, 0.9), 2.5);
+        let m = name.take_right(20.0);
+        ui.icon_in(m, 13.0, Icon::Map, theme::ACCENT);
     }
     ui.label(name, ctx.inv.name(id), if selected { theme::BODY_STRONG } else { theme::BODY }, ink, Align::Start);
 

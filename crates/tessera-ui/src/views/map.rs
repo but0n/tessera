@@ -1,7 +1,8 @@
 //! The map: a nested Voronoi treemap of the focused directory (ADR-0004).
 //! Area is proportional to bytes on disk; nesting is containment; colour
 //! families follow the hierarchy (ADR-0011), so the eye can trace a subtree.
-//! Clicking opens a cell's top-level folder with a zoom (ADR-0010).
+//! Clicking or scrolling opens a cell's top-level folder with a zoom, and
+//! scrolling back (or Esc) returns (ADR-0010).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,9 +14,22 @@ use tessera_voronoi::{Polygon, Vec2};
 use super::Ctx;
 use super::widgets;
 use crate::gfx::cell_flags;
+use crate::gfx::icons::Icon;
 use crate::state::{Action, FADE_DURATION, Transition, ViewState, ZOOM_DURATION, ZOOM_PATIENCE, ZoomDir};
 use crate::theme::{self, Tone, alpha};
 use crate::ui::{Align, Rect, Ui, ease_in_out, ease_out};
+
+const HEADER_H: f32 = 52.0;
+/// Scroll distance (points) that makes one step through the hierarchy.
+const SCROLL_STEP: f32 = 120.0;
+/// Pinch magnification that makes one step.
+const PINCH_STEP: f32 = 0.35;
+/// Input pause that ends a gesture (and releases its latch).
+const QUIET: Duration = Duration::from_millis(220);
+/// How far the camera leans in (fraction of the zoom) while a scroll
+/// builds up, and how far the map shrinks while scrolling out.
+const LEAN_IN: f32 = 0.14;
+const LEAN_OUT: f32 = 0.05;
 
 /// Which part of a layout is on screen.
 #[derive(Copy, Clone)]
@@ -76,6 +90,11 @@ fn smoothstep(a: f32, b: f32, t: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
+fn lean_out(full: Camera, p: f32) -> Camera {
+    let k = 1.0 + (LEAN_OUT * p) as f64;
+    Camera { x: full.x - full.w * (k - 1.0) / 2.0, y: full.y - full.h * (k - 1.0) / 2.0, w: full.w * k, h: full.h * k }
+}
+
 fn bbox(c: &MapCell) -> [f64; 4] {
     let (min, max) = c.polygon.bbox();
     [min.x, min.y, max.x, max.y]
@@ -112,15 +131,15 @@ impl Fade {
 /// layout while the overview is showing).
 pub fn map_rect(area: Rect) -> Rect {
     let mut a = area;
-    a.take_top(66.0);
+    a.take_top(HEADER_H);
     Rect::new(a.x + theme::GUTTER, a.y, a.w - 2.0 * theme::GUTTER, a.h - theme::GUTTER)
 }
 
 pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut Vec<Action>) {
     let mut a = area;
-    header(ui, ctx, view, a.take_top(66.0).inset_xy(theme::GUTTER + 4.0, 0.0), out);
+    header(ui, ctx, view, a.take_top(HEADER_H).inset_xy(theme::GUTTER, 0.0), out);
     let map_rect = map_rect(area);
-    ui.rect(map_rect.inset(-1.0), theme::PANEL, theme::RADIUS);
+    ui.rect(map_rect, theme::PANEL, theme::RADIUS);
 
     let now = Instant::now();
     let current = ctx.layout.clone().filter(|l| l.focus == view.focus);
@@ -133,8 +152,10 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
         }
         let t = tr.start.map_or(0.0, |s| (now - s).as_secs_f32() / ZOOM_DURATION);
         let waiting = current.is_none() && now - tr.asked < ZOOM_PATIENCE * 4;
+        hold_gesture(ui, view, map_rect);
         if t < 1.0 || waiting {
-            transition(ui, ctx, view, &tr, current.as_deref(), t.min(1.0), map_rect);
+            let e = tr.pre + (1.0 - tr.pre) * ease_in_out(t.min(1.0));
+            transition(ui, ctx, view, &tr, current.as_deref(), t.min(1.0), e, map_rect);
             if current.is_none() && t >= 1.0 {
                 widgets::spinner(ui, map_rect.cx() - 10.0, map_rect.cy(), theme::TEXT);
             }
@@ -172,13 +193,27 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
         ui.label(map_rect, msg, theme::BODY, theme::TEXT_3, Align::Center);
         return;
     }
+    let full = Camera::full(&layout);
+    let probe = Screen::new(map_rect, full);
+    let interactive = !stale && age >= FADE_DURATION;
+    let hovered = if interactive && ui.hovered(map_rect) { layout.hit(probe.to_layout(ui.input.mouse)) } else { None };
+    let enter = hovered.map(|i| scope_of(&layout, i)).filter(|&sc| layout.cells[sc].kind == CellKind::Dir);
+    let can_up = ctx.inv.node(view.focus).parent().is_some();
+
+    // Scroll / pinch: lean toward the next level, step once it is reached.
+    let lean = if interactive { gesture(ui, view, &layout, enter, can_up, map_rect, out) } else { 0.0 };
     // Zoom from 98.5% → 100% as it fades in; also absorbs window resizes.
     let k = 1.0 + 0.015 * (1.0 - opacity as f64);
-    let full = Camera::full(&layout);
-    let cam = Camera { x: full.w * (1.0 - k) / 2.0, y: full.h * (1.0 - k) / 2.0, w: full.w * k, h: full.h * k };
+    let mut cam = Camera { x: full.w * (1.0 - k) / 2.0, y: full.h * (1.0 - k) / 2.0, w: full.w * k, h: full.h * k };
+    if lean > 0.0
+        && let Some(sc) = enter
+    {
+        cam = Camera::lerp(cam, Camera::fit(&layout, bbox(&layout.cells[sc])), (LEAN_IN * lean) as f64);
+    } else if lean < 0.0 {
+        cam = lean_out(cam, -lean);
+    }
     let s = Screen::new(map_rect, cam);
-    let interactive = !stale && age >= FADE_DURATION;
-    let hovered = if interactive && ui.hovered(s.rect) { layout.hit(s.to_layout(ui.input.mouse)) } else { None };
+    let hovered = if lean == 0.0 { hovered } else { hovered.filter(|_| lean > 0.0) };
     cells(ui, ctx, view, &layout, &s, Fade::all(opacity), hovered);
     if stale {
         widgets::spinner(ui, map_rect.cx() - 10.0, map_rect.cy(), theme::TEXT);
@@ -188,9 +223,79 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
     }
 }
 
-/// One frame of a scope change at progress `t` ∈ [0, 1].
-fn transition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, tr: &Transition, new: Option<&MapLayout>, t: f32, map_rect: Rect) {
-    let e = ease_in_out(t);
+/// Feeds scroll and pinch into the view's gesture; returns the lean in
+/// [-1, 1] to preview. Steps fire at ±1: into `enter`, or up a level.
+fn gesture(ui: &mut Ui, view: &mut ViewState, layout: &MapLayout, enter: Option<usize>, can_up: bool, map_rect: Rect, out: &mut Vec<Action>) -> f32 {
+    let now = Instant::now();
+    let g = &mut view.gesture;
+    let dt = g.last_frame.map_or(0.0, |t| (now - t).as_secs_f32().min(0.1));
+    g.last_frame = Some(now);
+    let input = ui.input;
+    let mut delta = 0.0;
+    if ui.hovered(map_rect) {
+        delta = input.wheel.1 / SCROLL_STEP + input.pinch / PINCH_STEP;
+        if input.wheel_notch && input.wheel.1 != 0.0 {
+            // A mouse wheel notch is a deliberate, discrete step.
+            delta = input.wheel.1.signum();
+        }
+    }
+    if delta != 0.0 {
+        let quiet = g.last_input.is_none_or(|t| now - t > QUIET);
+        let reversed = g.acc != 0.0 && g.acc.signum() != delta.signum();
+        if quiet || reversed {
+            g.latched = false;
+            if reversed {
+                g.acc = 0.0;
+            }
+        }
+        g.last_input = Some(now);
+        if !g.latched {
+            g.acc += delta;
+        }
+    } else if g.last_input.is_none_or(|t| now - t > Duration::from_millis(90)) {
+        // Released short of a step: spring back.
+        g.acc *= (-dt * 14.0).exp();
+        if g.acc.abs() < 0.002 {
+            g.acc = 0.0;
+        }
+    }
+    // Nowhere to go: resist like a rubber band.
+    let open = if g.acc > 0.0 { enter.is_some() } else { can_up };
+    if !open {
+        g.acc = g.acc.clamp(-0.22, 0.22);
+    }
+    if g.acc != 0.0 {
+        ui.animating = true;
+    }
+    if open && g.acc.abs() >= 1.0 {
+        let dir = g.acc.signum();
+        g.latched = true;
+        g.acc = 0.0;
+        g.handoff = if dir > 0.0 { LEAN_IN } else { 0.0 };
+        match enter {
+            Some(sc) if dir > 0.0 => out.push(Action::Focus(layout.cells[sc].node)),
+            _ => out.push(Action::FocusUp),
+        }
+        return dir * if dir > 0.0 { 1.0 } else { 0.0 };
+    }
+    let p = g.acc.clamp(-1.0, 1.0);
+    // Ease so the first bit of a scroll is clearly felt.
+    p.signum() * (1.0 - (1.0 - p.abs()).powi(2))
+}
+
+/// While a transition runs, input only keeps the gesture's latch alive.
+fn hold_gesture(ui: &Ui, view: &mut ViewState, map_rect: Rect) {
+    if ui.hovered(map_rect) && (ui.input.wheel.1 != 0.0 || ui.input.pinch != 0.0) {
+        view.gesture.last_input = Some(Instant::now());
+    }
+    view.gesture.acc = 0.0;
+    view.gesture.last_frame = None;
+}
+
+/// One frame of a scope change at clock `t` ∈ [0, 1]; `e` is the eased
+/// camera progress (which may start part-way, after a scroll preview).
+#[allow(clippy::too_many_arguments)]
+fn transition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, tr: &Transition, new: Option<&MapLayout>, t: f32, e: f32, map_rect: Rect) {
     let old = &*tr.old;
     match tr.dir {
         ZoomDir::In => {
@@ -202,8 +307,8 @@ fn transition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, tr: &Transition, new
             let inside = if new.is_some() { 1.0 - smoothstep(0.35, 0.8, t) } else { 1.0 };
             cells(ui, ctx, view, old, &Screen::new(map_rect, cam), Fade { sub: Some(p), inside, outside: 1.0 - smoothstep(0.0, 0.55, t) }, None);
             if let Some(new) = new {
-                let from = Screen::new(map_rect, Camera::full(old)).rect_of(b);
-                let s = Screen { rect: lerp_rect(from, map_rect, e), cam: Camera::full(new), clip: map_rect };
+                let from = Screen::new(map_rect, cam).rect_of(b);
+                let s = Screen { rect: lerp_rect(from, map_rect, smoothstep(0.0, 1.0, e)), cam: Camera::full(new), clip: map_rect };
                 cells(ui, ctx, view, new, &s, Fade::all(smoothstep(0.25, 0.75, t)), None);
             }
         }
@@ -215,7 +320,7 @@ fn transition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, tr: &Transition, new
             let b = bbox(&new.cells[p]);
             let cam = Camera::lerp(Camera::fit(new, b), Camera::full(new), e as f64);
             cells(ui, ctx, view, new, &Screen::new(map_rect, cam), Fade { sub: Some(p), inside: smoothstep(0.3, 0.8, t), outside: smoothstep(0.05, 0.6, t) }, None);
-            let to = Screen::new(map_rect, Camera::full(new)).rect_of(b);
+            let to = Screen::new(map_rect, cam).rect_of(b);
             let s = Screen { rect: lerp_rect(map_rect, to, e), cam: Camera::full(old), clip: map_rect };
             cells(ui, ctx, view, old, &s, Fade::all(1.0 - smoothstep(0.3, 0.75, t)), None);
         }
@@ -256,40 +361,65 @@ pub fn request_layout(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect) {
     }
 }
 
+/// Back button, the path to the scope (each step clickable), and the
+/// scope's totals on the right.
 fn header(ui: &mut Ui, ctx: &Ctx, view: &ViewState, r: Rect, out: &mut Vec<Action>) {
     let n = ctx.inv.node(view.focus);
     let mut row = r;
-    if n.parent().is_some() {
-        let up = row.take_left(30.0);
-        if widgets::icon_button(ui, Rect::new(up.x, up.cy() - 15.0, 30.0, 30.0), "←", false) {
-            out.push(Action::FocusUp);
-        }
-        row.take_left(10.0);
+    let up = row.take_left(28.0);
+    if widgets::icon_button(ui, Rect::new(up.x, up.cy() - 14.0, 28.0, 28.0), Icon::ArrowLeft, "Up one level  Esc", n.parent().is_some()) {
+        out.push(Action::FocusUp);
     }
-    let legend_w = 380.0;
-    let mut title = row;
-    let legend = title.take_right(legend_w);
-    ui.label(Rect::new(title.x, title.cy() - 20.0, title.w, 22.0), ctx.inv.name(view.focus), theme::TITLE, theme::TEXT, Align::Start);
-    let sub = format!("{} · {} files · {} folders · area ∝ size on disk", ByteSize(n.size()), widgets::count(n.files() as u64), widgets::count(n.dirs() as u64));
-    ui.label(Rect::new(title.x, title.cy() + 3.0, title.w, 18.0), &sub, theme::SMALL, theme::TEXT_3, Align::Start);
+    row.take_left(8.0);
 
-    // Legend: the visual vocabulary of the map, spelled out.
-    let items: [(&str, u8); 4] = [("Folder", 0), ("File", 1), ("Small items", 2), ("Marked", 3)];
-    let mut x = legend.right();
-    for (label, kind) in items.iter().rev() {
-        let w = ui.measure(label, theme::SMALL) + 22.0;
-        x -= w + 10.0;
-        let sw = Rect::new(x, legend.cy() - 6.0, 12.0, 12.0);
-        match kind {
-            0 => {
-                ui.rect(sw, theme::tone(0, Tone::Frame(1), 0), 3.5);
-                ui.rect(sw.inset(3.0), theme::tone(0, Tone::Folder, 0), 1.5);
-            }
-            1 => ui.rect(sw, theme::tone(0, Tone::File, 0), 3.5),
-            2 => ui.rect(sw, theme::tone(0, Tone::Rest, 0), 3.5),
-            _ => ui.stripes(sw, theme::mix(theme::tone(0, Tone::File, 0), theme::RECLAIM, 0.3), theme::RECLAIM, 3.5),
+    // Totals: size, then what it is made of.
+    let counts = format!("{} files · {} folders", widgets::count(n.files() as u64), widgets::count(n.dirs() as u64));
+    let cw = ui.measure(&counts, theme::SMALL);
+    let totals = row.take_right(cw + 96.0);
+    ui.label(Rect { x: totals.right() - cw, w: cw, ..totals }, &counts, theme::SMALL, theme::TEXT_3, Align::End);
+    widgets::size_text(ui, Rect { w: totals.w - cw - 12.0, ..totals }, n.size(), theme::NUM_STRONG, theme::TEXT_2, Align::End);
+    row.take_right(12.0);
+    breadcrumb(ui, ctx, view, row, out);
+}
+
+fn breadcrumb(ui: &mut Ui, ctx: &Ctx, view: &ViewState, r: Rect, out: &mut Vec<Action>) {
+    let mut chain: Vec<NodeId> = ctx.inv.ancestors(view.focus).collect();
+    chain.reverse();
+    let sep = 18.0;
+    let style = |last: bool| if last { theme::TITLE } else { theme::BODY };
+    let widths: Vec<f32> = chain.iter().enumerate().map(|(i, &id)| ui.measure(ctx.inv.name(id), style(i + 1 == chain.len())).min(220.0) + 12.0).collect();
+    // Keep the tail visible: fold leading steps that would not fit.
+    let root_w = 22.0;
+    let mut start = 0;
+    while start + 1 < chain.len() && root_w + widths[start..].iter().sum::<f32>() + sep * (chain.len() - start) as f32 + 24.0 > r.w {
+        start += 1;
+    }
+    let mut x = r.x;
+    let cy = r.cy();
+    ui.icon(x, cy - 8.0, 16.0, Icon::Drive, theme::TEXT_3);
+    x += root_w;
+    if start > 0 {
+        x += ui.text(x, cy - 9.0, "…", theme::BODY, theme::TEXT_3) + 4.0;
+        ui.icon(x, cy - 6.0, 12.0, Icon::ChevronRight, theme::TEXT_3);
+        x += sep;
+    }
+    for (i, &id) in chain.iter().enumerate().skip(start) {
+        let last = i + 1 == chain.len();
+        let seg = Rect::new(x - 6.0, cy - 13.0, widths[i], 26.0);
+        let (hover, click) = if last { (false, false) } else { ui.interact(seg) };
+        if hover {
+            ui.rect(seg, theme::HOVER, theme::RADIUS_SM);
         }
-        ui.text(x + 18.0, legend.cy() - 8.0, label, theme::SMALL, theme::TEXT_2);
+        let ink = if last || hover { theme::TEXT } else { theme::TEXT_2 };
+        ui.label(seg.inset_xy(6.0, 0.0), ctx.inv.name(id), style(last), ink, Align::Start);
+        if click {
+            out.push(Action::Focus(id));
+        }
+        x += widths[i];
+        if !last {
+            ui.icon(x - 3.0, cy - 6.0, 12.0, Icon::ChevronRight, theme::TEXT_3);
+            x += sep - 6.0;
+        }
     }
 }
 
@@ -356,10 +486,20 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         if max.x < s.clip.x as f64 || min.x > s.clip.right() as f64 || max.y < s.clip.y as f64 || min.y > s.clip.bottom() as f64 {
             continue;
         }
-        let gap = if c.depth == 1 { 1.75 } else { 1.15 };
-        let want_r = (if c.depth == 1 { 7.0 } else { 4.5 }) * zoom.min(3.0);
+        // Grout between cells thins with depth; corners round off in
+        // proportion to the cell, so big cells read as soft pebbles.
+        let gap = match c.depth {
+            1 => 1.6,
+            2 => 1.1,
+            _ => 0.8,
+        } * zoom.min(2.0);
+        let want_r = match c.depth {
+            1 => 9.0,
+            2 => 6.0,
+            _ => 4.0,
+        } * zoom.min(3.0);
         let inr = poly.inradius_at_centroid();
-        let r = want_r.min(inr * 0.3);
+        let r = want_r.min(inr * 0.4);
         let mut shape = poly.inset(gap + r);
         if shape.is_empty() {
             shape = poly.inset(gap * 0.5);
@@ -368,6 +508,7 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
             }
         }
 
+        let others = matches!(c.kind, CellKind::Others { .. });
         let tone = match c.kind {
             CellKind::Others { .. } => Tone::Rest,
             CellKind::Dir if c.has_children => Tone::Frame(c.depth),
@@ -375,16 +516,23 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
             CellKind::File => Tone::File,
         };
         let color = theme::tone(fam[i], tone, c.rank);
-        let light = if matches!(tone, Tone::Frame(_) | Tone::Rest) { 0.45 } else { 1.0 };
-        let others = matches!(c.kind, CellKind::Others { .. });
+        let light = if matches!(tone, Tone::Frame(_)) { 0.6 } else { 1.0 };
         let mut flags = 0;
+        if others {
+            flags |= cell_flags::OTHERS;
+        }
         if hovered == Some(i) && !others {
             flags |= cell_flags::HOVER;
         }
-        if scope == Some(i) {
+        if scope == Some(i) && layout.cells[i].kind == CellKind::Dir {
             flags |= cell_flags::SCOPE;
         }
-        if !others {
+        if others {
+            // Small items share their folder's fate.
+            if ctx.is_marked(c.node) || ctx.is_covered(c.node) {
+                flags |= cell_flags::COVERED;
+            }
+        } else {
             if view.selected == Some(c.node) {
                 flags |= cell_flags::SELECTED;
             }
@@ -399,15 +547,18 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         ui.cell(&pts, color, theme::RECLAIM, r as f32, flags, light, o);
 
         let label_r = shape.inradius_at_centroid() + r;
-        if o > 0.8 && label_r >= 15.0 && (c.depth == 1 || !c.has_children) {
+        if o > 0.8 && label_r >= 14.0 && !others && (c.depth == 1 || !c.has_children) {
             labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i] });
         }
     }
-    place_labels(ui, ctx, layout, labels, s.clip, scope);
+    place_labels(ui, ctx, layout, labels, s.clip);
     ui.set_clip(prev);
 }
 
-fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<LabelCand>, bounds: Rect, scope: Option<usize>) {
+/// Labels sized to their cell: big cells get big type and their size, small
+/// ones just a name, the smallest nothing (the tooltip has it). Top-level
+/// folders showing their contents float a name over them on a soft scrim.
+fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<LabelCand>, bounds: Rect) {
     ui.layer = 1;
     cands.sort_by(|a, b| {
         let (ca, cb) = (&layout.cells[a.idx], &layout.cells[b.idx]);
@@ -417,73 +568,51 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
     for cand in cands {
         let opacity = cand.alpha;
         let c: &MapCell = &layout.cells[cand.idx];
-        let name: String = match c.kind {
-            CellKind::Others { count } => format!("{} small items", widgets::count(count as u64)),
-            _ => ctx.inv.name(c.node).to_owned(),
+        let full_name = ctx.inv.name(c.node);
+        // Deeper labels step down a size so the hierarchy reads in type too.
+        let room = cand.inradius as f32 * if c.depth == 1 { 1.0 } else { 0.78 };
+        let (style, with_size) = if room >= 68.0 {
+            (theme::MAP_L, true)
+        } else if room >= 38.0 {
+            (theme::MAP_M, true)
+        } else if room >= 17.0 {
+            (theme::MAP_S, false)
+        } else {
+            continue;
         };
         let (cx, cy) = (cand.center.x as f32, cand.center.y as f32);
-        if c.has_children {
-            // Frame label: a pill floating over the children.
-            let style = if c.depth == 1 { theme::SMALL_STRONG } else { theme::CAPTION };
-            let size = ByteSize(c.size).to_string();
-            let max_name = (cand.inradius as f32 * 2.2).min(220.0);
-            let name = ui.text.elide(&name, &style, max_name);
-            let wn = ui.measure(&name, style);
-            let ws = ui.measure(&size, theme::NUM);
-            let w = wn + ws + 26.0;
-            // Keep pills fully inside the map even for cells on its edge.
-            let x = (cx - w / 2.0).clamp(bounds.x + 6.0, (bounds.right() - w - 6.0).max(bounds.x + 6.0));
-            let y = (cy - 12.0).clamp(bounds.y + 6.0, bounds.bottom() - 30.0);
-            let r = Rect::new(x, y, w, 24.0);
-            if placed.iter().any(|p| p.overlaps(&r)) {
-                continue;
-            }
-            ui.shadow(r, alpha(theme::BG, 0.5 * opacity), 12.0, 8.0);
-            if scope == Some(cand.idx) {
-                ui.rect_border(r, alpha(theme::RAISED, 0.96 * opacity), alpha(theme::TEXT, 0.35 * opacity), 1.0, 12.0);
-            } else {
-                ui.rect(r, alpha(theme::BG, 0.78 * opacity), 12.0);
-            }
-            ui.text(r.x + 10.0, r.cy() - style.line_height() / 2.0, &name, style, alpha(theme::TEXT, opacity));
-            ui.text(r.x + 16.0 + wn, r.cy() - theme::NUM.line_height() / 2.0, &size, theme::NUM, alpha(theme::branch(cand.hue), opacity));
-            placed.push(r.inset(-4.0));
-        } else {
-            // Leaf label: set directly on the cell, size beneath when it fits.
-            let max_w = (cand.inradius as f32 * 1.8).max(10.0);
-            let two_lines = cand.inradius >= 26.0;
-            let style = if c.depth == 1 && cand.inradius >= 40.0 { theme::BODY_STRONG } else { theme::SMALL_STRONG };
-            let mut name = ui.text.elide(&name, &style, max_w);
-            if let CellKind::Others { count } = c.kind
-                && name.ends_with('…')
-            {
-                name = format!("+{}", widgets::count(count as u64));
-            }
-            // A label reduced to a stub says nothing; leave the cell bare.
-            let full = match c.kind {
-                CellKind::Others { .. } => name.chars().count(),
-                _ => ctx.inv.name(c.node).chars().count(),
-            };
-            if name.ends_with('…') && name.chars().count() < full.min(6) + 1 {
-                continue;
-            }
-            if ui.measure(&name, style) > max_w + 1.0 {
-                continue;
-            }
-            let wn = ui.measure(&name, style);
-            let lh = style.line_height();
-            let h = if two_lines { lh + 15.0 } else { lh };
-            let r = Rect::new(cx - wn / 2.0, cy - h / 2.0, wn, h);
-            if placed.iter().any(|p| p.overlaps(&r)) {
-                continue;
-            }
-            ui.text(r.x, r.y, &name, style, alpha(theme::TEXT, 0.95 * opacity));
-            if two_lines {
-                let size = ByteSize(c.size).to_string();
-                let ws = ui.measure(&size, theme::NUM);
-                ui.text(cx - ws / 2.0, r.y + lh, &size, theme::NUM, alpha(theme::TEXT, 0.6 * opacity));
-            }
-            placed.push(r.inset(-3.0));
+        let frame = c.has_children;
+        let max_w = cand.inradius as f32 * if frame { 2.4 } else { 1.8 };
+        let name = ui.text.elide(full_name, &style, max_w);
+        // A label cut down to a stub says nothing; leave the cell bare
+        // (folders keep a shorter stub, they are worth naming).
+        let (kept, total) = (name.chars().count().saturating_sub(1), full_name.chars().count());
+        if name.ends_with('…') && (kept < total.min(6) || (!frame && c.kind == CellKind::File && (kept as f32) < total as f32 * 0.7)) {
+            continue;
         }
+        let wn = ui.measure(&name, style);
+        let size = ByteSize(c.size).to_string();
+        let ws = if with_size { ui.measure(&size, theme::MAP_NUM) } else { 0.0 };
+        let lh = style.line_height();
+        let h = if with_size { lh + 14.0 } else { lh };
+        let w = wn.max(ws);
+        let x = (cx - w / 2.0).clamp(bounds.x + 8.0, (bounds.right() - w - 8.0).max(bounds.x + 8.0));
+        let y = (cy - h / 2.0).clamp(bounds.y + 6.0, bounds.bottom() - h - 6.0);
+        let r = Rect::new(x, y, w, h);
+        if placed.iter().any(|p| p.overlaps(&r)) {
+            continue;
+        }
+        if frame {
+            // Over busy content: a soft dark halo, no hard pill.
+            ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, 0.5 * opacity), 16.0, 12.0);
+        }
+        let ink = if frame { theme::TEXT } else { alpha(theme::TEXT, 0.94) };
+        ui.text(r.cx() - wn / 2.0, r.y, &name, style, alpha(ink, ink[3] * opacity));
+        if with_size {
+            let size_ink = if frame { theme::branch(cand.hue) } else { alpha(theme::TEXT, 0.58) };
+            ui.text(r.cx() - ws / 2.0, r.y + lh, &size, theme::MAP_NUM, alpha(size_ink, size_ink[3] * opacity));
+        }
+        placed.push(r.inset(if frame { -10.0 } else { -4.0 }));
     }
     ui.layer = 0;
 }
@@ -497,13 +626,17 @@ fn interact(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s:
     let sc = scope_of(layout, i);
     let scope = &layout.cells[sc];
     let enters = scope.kind == CellKind::Dir;
-    if enters || !others {
+    let alt = ui.input.mods.alt_key();
+    // The cursor says what a click does: zoom in, or pick.
+    if enters && !alt {
+        ui.cursor = winit::window::CursorIcon::ZoomIn;
+    } else if !others {
         ui.cursor = winit::window::CursorIcon::Pointer;
     }
     // A click must start and end in the same scope (no accidental drags).
     let same = layout.hit(s.to_layout(ui.input.press_pos)).map(|j| scope_of(layout, j)) == Some(sc);
     if ui.clicked(s.rect) && same {
-        if ui.input.mods.alt_key() {
+        if alt {
             if !others {
                 out.push(Action::Select(c.node));
             }
@@ -517,81 +650,79 @@ fn interact(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s:
         out.push(Action::ToggleMark(c.node));
     }
     let tint = theme::branch(if others { view.hue(ctx.inv, layout.focus) } else { view.family(ctx.inv, c.node) });
-    tooltip(ui, ctx, c, tint, enters.then_some(scope.node));
+    tooltip(ui, ctx, c, tint, (enters && !alt).then_some(scope.node));
 }
 
+/// Hover card: what this is, how big, and (in the footer) what a click opens.
 fn tooltip(ui: &mut Ui, ctx: &Ctx, c: &MapCell, tint: theme::Rgba, opens: Option<NodeId>) {
     ui.layer = 2;
     let (mx, my) = ui.input.mouse;
-    let w = 300.0;
+    let w = 280.0;
     let others = matches!(c.kind, CellKind::Others { .. });
     let node = ctx.inv.node(c.node);
-    // Content + padding + the hint strip.
-    let h = if others { 66.0 } else { 88.0 } + 24.0 + 36.0;
+    let strip = if opens.is_some() { 32.0 } else { 0.0 };
+    let h = 104.0 + strip;
     let screen = ui.screen();
     let x = if mx + 18.0 + w > screen.right() - 8.0 { mx - 18.0 - w } else { mx + 18.0 };
     let y = (my + 18.0).min(screen.bottom() - h - 8.0);
     let r = Rect::new(x, y, w, h);
     ui.shadow(r, alpha(theme::BG, 0.7), theme::RADIUS, 18.0);
     ui.rect_border(r, alpha(theme::RAISED, 0.97), theme::LINE, 1.0, theme::RADIUS);
-    let mut a = r.inset_xy(14.0, 12.0);
-    let title = if others { "Small items".to_string() } else { ctx.inv.name(c.node).to_string() };
-    let t = a.take_top(20.0);
-    widgets::dot(ui, t.x + 4.0, t.cy(), 8.0, tint);
-    ui.label(Rect::new(t.x + 14.0, t.y, t.w - 14.0, t.h), &title, theme::BODY_STRONG, theme::TEXT, Align::Start);
-    if others {
-        let CellKind::Others { count } = c.kind else { unreachable!() };
-        footer_hint(ui, r, ctx, opens, false);
-        ui.label(a.take_top(18.0), &format!("{} entries in {} too small to draw", widgets::count(count as u64), ctx.inv.name(c.node)), theme::SMALL, theme::TEXT_2, Align::Start);
-        let mut sz = a.take_top(28.0);
-        let share = sz.take_right(120.0);
-        widgets::size_text(ui, sz, c.size, theme::NUM_BIG, theme::TEXT, Align::Start);
-        ui.label(share, &format!("{} of parent", widgets::percent(c.share)), theme::SMALL, theme::TEXT_3, Align::End);
-        ui.layer = 0;
-        return;
-    }
-    ui.label(a.take_top(16.0), &ctx.inv.relative_path(c.node), theme::MONO, theme::TEXT_3, Align::Start);
-    a.take_top(6.0);
-    let mut sz = a.take_top(28.0);
-    let share = sz.take_right(120.0);
-    widgets::size_text(ui, sz, node.size(), theme::NUM_BIG, if ctx.is_marked(c.node) { theme::RECLAIM } else { theme::TEXT }, Align::Start);
-    let parent = node.parent().map_or(node.size(), |p| ctx.inv.node(p).size()).max(1);
-    ui.label(share, &format!("{} of parent", widgets::percent(node.size() as f64 / parent as f64)), theme::SMALL, theme::TEXT_3, Align::End);
-    if node.is_dir() {
-        let line = format!("{} files · {} folders", widgets::count(node.files() as u64), widgets::count(node.dirs() as u64));
-        let mut l = a.take_top(18.0);
-        if node.hint().is_some() {
-            let bw = ui.measure(node.hint().label(), theme::CAPTION) + 14.0;
-            let b = l.take_right(bw);
-            widgets::badge(ui, b.x, b.cy(), node.hint().label(), theme::hint(node.hint()));
-        }
-        ui.label(l, &line, theme::SMALL, theme::TEXT_2, Align::Start);
-    } else {
-        ui.label(a.take_top(18.0), node.category().label(), theme::SMALL, theme::TEXT_2, Align::Start);
-    }
-    footer_hint(ui, r, ctx, opens, true);
-    ui.layer = 0;
-}
+    let mut a = r.inset_xy(14.0, 13.0);
 
-/// Bottom strip of the tooltip: what a click does here.
-fn footer_hint(ui: &mut Ui, r: Rect, ctx: &Ctx, opens: Option<NodeId>, markable: bool) {
-    let strip = Rect::new(r.x + 1.0, r.bottom() - 31.0, r.w - 2.0, 30.0);
-    ui.rect(Rect::new(strip.x, strip.y, strip.w, 1.0), theme::LINE, 0.0);
-    let mut row = strip.inset_xy(13.0, 0.0);
-    let text = match opens {
-        Some(id) => format!("Click to open {}", ctx.inv.name(id)),
-        None if markable => "Click to select".to_string(),
-        None => String::new(),
+    // Title row: icon, name, size.
+    let mut t = a.take_top(20.0);
+    let (icon, title, bytes) = match c.kind {
+        CellKind::Others { count } => (Icon::Dots, format!("{} small items", widgets::count(count as u64)), c.size),
+        _ => (widgets::kind_icon(node), ctx.inv.name(c.node).to_string(), node.size()),
     };
-    if markable {
-        let w = ui.measure("Right-click to mark", theme::SMALL);
-        let m = row.take_right(w);
-        ui.label(m, "Right-click to mark", theme::SMALL, theme::TEXT_3, Align::End);
-        row.take_right(10.0);
+    ui.icon(t.x, t.cy() - 8.0, 16.0, icon, tint);
+    t.take_left(24.0);
+    let size_w = widgets::size_text(ui, t, bytes, theme::NUM_STRONG, if ctx.is_marked(c.node) && !others { theme::RECLAIM } else { theme::TEXT }, Align::End);
+    t.take_right(size_w + 10.0);
+    ui.label(t, &title, theme::BODY_STRONG, theme::TEXT, Align::Start);
+    a.take_top(4.0);
+    let path = if others { format!("in {}", ctx.inv.relative_path(c.node)) } else { ctx.inv.relative_path(c.node) };
+    ui.label(a.take_top(16.0), &path, theme::MONO, theme::TEXT_3, Align::Start);
+    a.take_top(12.0);
+
+    // Share of the parent, as a bar.
+    let share = if others {
+        c.share
+    } else {
+        let parent = node.parent().map_or(node.size(), |p| ctx.inv.node(p).size()).max(1);
+        node.size() as f64 / parent as f64
+    };
+    let mut m = a.take_top(14.0);
+    let pct = format!("{} of parent", widgets::percent(share));
+    let pw = ui.measure(&pct, theme::SMALL);
+    ui.label(m.take_right(pw), &pct, theme::SMALL, theme::TEXT_3, Align::End);
+    widgets::meter(ui, Rect::new(m.x, m.cy() - 2.0, m.w - 12.0, 4.0), share as f32, tint);
+    a.take_top(8.0);
+
+    // Composition, or kind; plus a hint badge.
+    let mut l = a.take_top(18.0);
+    let line = if others {
+        "too small to draw individually".to_string()
+    } else if node.is_dir() {
+        format!("{} files · {} folders", widgets::count(node.files() as u64), widgets::count(node.dirs() as u64))
+    } else {
+        node.category().label().to_string()
+    };
+    if !others && node.hint().is_some() {
+        let bw = ui.measure(node.hint().label(), theme::CAPTION) + 14.0;
+        let b = l.take_right(bw);
+        widgets::badge(ui, b.x, b.cy(), node.hint().label(), theme::hint(node.hint()));
     }
-    if opens.is_some() {
-        widgets::dot(ui, row.x + 3.0, row.cy(), 5.0, theme::TEXT_2);
-        row.take_left(12.0);
+    ui.label(l, &line, theme::SMALL, theme::TEXT_2, Align::Start);
+
+    if let Some(id) = opens {
+        let strip = Rect::new(r.x + 1.0, r.bottom() - strip, r.w - 2.0, strip - 1.0);
+        ui.rect(Rect::new(strip.x, strip.y, strip.w, 1.0), theme::LINE, 0.0);
+        let mut row = strip.inset_xy(13.0, 0.0);
+        ui.icon(row.x, row.cy() - 7.0, 14.0, Icon::Mouse, theme::TEXT_3);
+        row.take_left(22.0);
+        ui.label(row, &format!("Click or scroll to open {}", ctx.inv.name(id)), theme::SMALL, theme::TEXT_2, Align::Start);
     }
-    ui.label(row, &text, theme::SMALL_STRONG, theme::TEXT_2, Align::Start);
+    ui.layer = 0;
 }

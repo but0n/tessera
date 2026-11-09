@@ -29,5 +29,6 @@ meanings. Code identifiers are given in `backticks`.
 | **Map** | The nested Voronoi treemap of the focus. | `MapLayout` |
 | **Cell** | One convex region of the map; its area is proportional to its size. | `MapCell` |
 | **Branch** | The top-level child of the focus a cell descends from; its family colours the whole subtree. | `MapCell::branch` |
-| **Small items** | Siblings too small to draw individually, folded into one cell. | `CellKind::Others` |
+| **Small items** | Siblings too small to draw individually, folded into one dotted cell. | `CellKind::Others` |
+| **Step** | One level of map navigation, in or out, by click, scroll, pinch or Esc. A scroll *leans* toward the step before it fires. | `state::Gesture` |
 | **Sample data** | A fictional folder served through the real ports, for demos and screenshots. | `tessera_infra::SampleReader` |

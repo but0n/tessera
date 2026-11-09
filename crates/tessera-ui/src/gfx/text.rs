@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use glyphon::cosmic_text::{FeatureTag, FontFeatures};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Attrs, Buffer, Cache, Color, ColorMode, CustomGlyph, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Weight, Wrap,
 };
 
 use super::LAYERS;
@@ -62,8 +63,19 @@ pub struct TextItem {
     pub clip: Rect,
 }
 
+/// A vector icon drawn through the text atlas (see [`super::icons`]).
+pub struct IconItem {
+    pub icon: super::icons::Icon,
+    pub pos: (f32, f32),
+    pub size: f32,
+    pub color: [f32; 4],
+    pub clip: Rect,
+}
+
 pub struct TextSystem {
     fonts: FontSystem,
+    /// Empty buffer hosting icon glyphs.
+    blank: Buffer,
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
@@ -96,7 +108,9 @@ impl TextSystem {
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::with_color_mode(device, queue, &cache, format, ColorMode::Web);
         let renderers = (0..LAYERS).map(|_| TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None)).collect();
-        TextSystem { fonts, swash: SwashCache::new(), atlas, viewport, renderers, cache: HashMap::new(), elided: HashMap::new(), sans, mono, scale: 1.0, frame: 0 }
+        let mut fonts = fonts;
+        let blank = Buffer::new(&mut fonts, Metrics::new(1.0, 1.0));
+        TextSystem { fonts, blank, swash: SwashCache::new(), atlas, viewport, renderers, cache: HashMap::new(), elided: HashMap::new(), sans, mono, scale: 1.0, frame: 0 }
     }
 
     pub fn begin_frame(&mut self, scale: f32) {
@@ -191,32 +205,62 @@ impl TextSystem {
         }
         self.viewport.update(queue, Resolution { width: phys.0, height: phys.1 });
         let scale = self.scale;
-        let TextSystem { fonts, swash, atlas, viewport, renderers, cache, .. } = self;
+        let TextSystem { fonts, blank, swash, atlas, viewport, renderers, cache, .. } = self;
+        let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let color = |c: [f32; 4]| Color::rgba(to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3]));
+        let bounds = |r: &Rect| TextBounds {
+            left: (r.x * scale).floor() as i32,
+            top: (r.y * scale).floor() as i32,
+            right: ((r.x + r.w) * scale).ceil() as i32,
+            bottom: ((r.y + r.h) * scale).ceil() as i32,
+        };
         for (li, layer) in frame.layers.iter().enumerate() {
+            // One glyph per area, since every icon carries its own clip.
+            let glyphs: Vec<[CustomGlyph; 1]> = layer
+                .icons
+                .iter()
+                .map(|i| {
+                    // Snap the box to whole physical pixels so strokes stay crisp.
+                    let px = (i.size * scale).round() / scale;
+                    [CustomGlyph {
+                        id: i.icon as u16,
+                        left: (i.pos.0 * scale).round() / scale,
+                        top: (i.pos.1 * scale).round() / scale,
+                        width: px,
+                        height: px,
+                        color: Some(color(i.color)),
+                        snap_to_physical_pixel: true,
+                        metadata: 0,
+                    }]
+                })
+                .collect();
+            let icon_areas = layer.icons.iter().zip(&glyphs).map(|(i, g)| TextArea {
+                buffer: blank,
+                left: 0.0,
+                top: 0.0,
+                scale,
+                bounds: bounds(&i.clip),
+                default_color: color(i.color),
+                custom_glyphs: g,
+            });
             let areas: Vec<TextArea> = layer
                 .texts
                 .iter()
                 .filter_map(|t| {
                     let shaped = cache.get(&Key::new(&t.text, &t.style))?;
-                    let c = t.color;
-                    let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                     Some(TextArea {
                         buffer: &shaped.buffer,
                         left: (t.pos.0 * scale).round(),
                         top: (t.pos.1 * scale).round(),
                         scale: 1.0,
-                        bounds: TextBounds {
-                            left: (t.clip.x * scale).floor() as i32,
-                            top: (t.clip.y * scale).floor() as i32,
-                            right: ((t.clip.x + t.clip.w) * scale).ceil() as i32,
-                            bottom: ((t.clip.y + t.clip.h) * scale).ceil() as i32,
-                        },
-                        default_color: Color::rgba(to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3])),
+                        bounds: bounds(&t.clip),
+                        default_color: color(t.color),
                         custom_glyphs: &[],
                     })
                 })
+                .chain(icon_areas)
                 .collect();
-            let _ = renderers[li].prepare(device, queue, fonts, atlas, viewport, areas, swash);
+            let _ = renderers[li].prepare_with_custom(device, queue, fonts, atlas, viewport, areas, swash, super::icons::rasterize);
         }
     }
 

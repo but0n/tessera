@@ -6,7 +6,8 @@
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::CursorIcon;
 
-use crate::gfx::text::{TextItem, TextStyle, TextSystem};
+use crate::gfx::icons::Icon;
+use crate::gfx::text::{IconItem, TextItem, TextStyle, TextSystem};
 use crate::gfx::{Cell, LAYERS, Quad};
 use crate::theme::Rgba;
 
@@ -91,6 +92,10 @@ pub struct Input {
     /// Mouse "back" button.
     pub back_pressed: bool,
     pub wheel: (f32, f32),
+    /// The wheel moved in discrete notches (a mouse) this frame.
+    pub wheel_notch: bool,
+    /// Trackpad magnification this frame; positive zooms in.
+    pub pinch: f32,
     pub keys: Vec<Key>,
     pub mods: ModifiersState,
     pub last_click: Option<(std::time::Instant, (f32, f32))>,
@@ -104,6 +109,8 @@ impl Input {
         self.right_pressed = false;
         self.back_pressed = false;
         self.wheel = (0.0, 0.0);
+        self.wheel_notch = false;
+        self.pinch = 0.0;
         self.keys.clear();
     }
 
@@ -121,6 +128,7 @@ pub struct Layer {
     pub quads: Vec<Quad>,
     pub cells: Vec<Cell>,
     pub texts: Vec<TextItem>,
+    pub icons: Vec<IconItem>,
 }
 
 /// Everything the renderer needs for one frame.
@@ -306,6 +314,17 @@ impl<'a> Ui<'a> {
         };
         let y = r.cy() - style.line_height() * 0.5;
         self.text(x, y, &s, style, color)
+    }
+
+    /// Draws `icon` as a `size`-point square with its top-left at `(x, y)`.
+    pub fn icon(&mut self, x: f32, y: f32, size: f32, icon: Icon, color: Rgba) {
+        let clip = self.clip;
+        self.layer_mut().icons.push(IconItem { icon, pos: (x, y), size, color, clip });
+    }
+
+    /// Draws `icon` centred in `r`.
+    pub fn icon_in(&mut self, r: Rect, size: f32, icon: Icon, color: Rgba) {
+        self.icon(r.cx() - size / 2.0, r.cy() - size / 2.0, size, icon, color);
     }
 
     pub fn finish(self) -> (Frame, CursorIcon, bool) {

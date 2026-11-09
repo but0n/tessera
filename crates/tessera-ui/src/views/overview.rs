@@ -150,7 +150,6 @@ fn composition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect) {
     let mut c = r.inset_xy(22.0, 20.0);
     let head = c.take_top(16.0);
     widgets::caption(ui, head.x, head.y, "Composition by kind", theme::TEXT_3);
-    ui.label(head, "area ∝ bytes", theme::SMALL, theme::TEXT_3, Align::End);
     c.take_top(12.0);
     let cats = &ctx.insights.categories;
     if cats.is_empty() {
@@ -187,8 +186,8 @@ fn composition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect) {
         }
         let cat = s.category.unwrap_or(tessera_domain::Category::Other);
         let mut rr = row;
-        widgets::dot(ui, rr.x + 4.0, rr.cy(), 8.0, theme::category(cat));
-        rr.take_left(16.0);
+        ui.icon(rr.x - 1.0, rr.cy() - 7.5, 15.0, widgets::category_icon(cat), theme::category(cat));
+        rr.take_left(24.0);
         let size = rr.take_right(64.0);
         let pct = rr.take_right(42.0);
         ui.label(rr, cat.short_label(), theme::BODY, theme::TEXT, Align::Start);
@@ -277,12 +276,9 @@ fn item_row(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, id: NodeId, row: Rect,
     let size = c.take_right(84.0);
     c.take_right(12.0);
     let color = if n.is_dir() { theme::hint(n.hint()) } else { theme::category(n.category()) };
-    if n.is_dir() {
-        widgets::folder(ui, c.x, c.cy(), color);
-    } else {
-        widgets::dot(ui, c.x + 5.0, c.cy(), 7.0, color);
-    }
-    c.take_left(22.0);
+    let icon_y = if two_line { c.y + 13.0 - 7.5 } else { c.cy() - 7.5 };
+    ui.icon(c.x, icon_y, 15.0, widgets::kind_icon(n), color);
+    c.take_left(24.0);
     let ink = if marked { theme::RECLAIM } else { theme::TEXT };
     let parent = n.parent().map(|p| ctx.inv.relative_path(p)).unwrap_or_default();
     if two_line {

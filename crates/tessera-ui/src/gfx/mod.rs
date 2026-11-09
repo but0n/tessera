@@ -1,6 +1,7 @@
 //! GPU renderer: two instanced SDF pipelines (quads, convex cells) plus
 //! glyphon text, drawn in a fixed number of layers (ADR-0003).
 
+pub mod icons;
 pub mod text;
 
 use std::mem::size_of;
@@ -44,6 +45,8 @@ pub mod cell_flags {
     pub const MARKED: u32 = 4;
     pub const COVERED: u32 = 8;
     pub const SCOPE: u32 = 16;
+    /// "Small items" aggregate: dot texture.
+    pub const OTHERS: u32 = 32;
 }
 
 #[repr(C)]

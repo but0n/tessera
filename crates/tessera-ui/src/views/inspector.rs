@@ -5,6 +5,7 @@ use tessera_domain::{EntryKind, NodeId};
 
 use super::widgets::{self, ButtonKind};
 use super::{Ctx, panel_header};
+use crate::gfx::icons::Icon;
 use crate::state::{Action, Tab, ViewState};
 use crate::theme::{self, alpha};
 use crate::ui::{Align, Rect, Ui};
@@ -24,9 +25,8 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
 
 fn selection(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut Vec<Action>) {
     let mut a = area;
-    let head = panel_header(&mut a);
-    widgets::caption(ui, head.x, head.cy() - 7.0, "Inspector", theme::TEXT_3);
-    let mut c = a.inset_xy(theme::GUTTER, 4.0);
+    panel_header(&mut a);
+    let mut c = a.inset_xy(theme::GUTTER, 0.0);
 
     let Some(id) = view.selected.filter(|&id| ctx.inv.get(id).is_some_and(|n| !n.is_removed())) else {
         let r = c.take_top(64.0);
@@ -39,13 +39,9 @@ fn selection(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut
 
     // Identity.
     let title = c.take_top(26.0);
-    let sw = Rect::new(title.x, title.cy() - 6.0, 12.0, 12.0);
-    if n.is_dir() {
-        widgets::folder(ui, sw.x, sw.cy(), tint);
-    } else {
-        widgets::dot(ui, sw.cx(), sw.cy(), 10.0, tint);
-    }
-    ui.label(Rect::new(title.x + 22.0, title.y, title.w - 22.0, title.h), ctx.inv.name(id), theme::TITLE, theme::TEXT, Align::Start);
+    let tint = if n.is_dir() { tint } else { theme::category(n.category()) };
+    ui.icon(title.x, title.cy() - 9.0, 18.0, widgets::kind_icon(n), tint);
+    ui.label(Rect::new(title.x + 27.0, title.y, title.w - 27.0, title.h), ctx.inv.name(id), theme::TITLE, theme::TEXT, Align::Start);
     let rel = ctx.inv.relative_path(id);
     ui.label(c.take_top(18.0), &rel, theme::MONO, theme::TEXT_3, Align::Start);
     c.take_top(14.0);
@@ -121,7 +117,8 @@ fn selection(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut
         } else {
             "Mark for removal"
         };
-        if widgets::button(ui, r, label, if marked { ButtonKind::Secondary } else { ButtonKind::Mark }, !covered) {
+        let icon = if marked { Icon::Close } else { Icon::Flag };
+        if widgets::button_icon(ui, r, Some(icon), label, if marked { ButtonKind::Secondary } else { ButtonKind::Mark }, !covered) {
             out.push(Action::ToggleMark(id));
         }
         c.take_top(8.0);
@@ -130,11 +127,11 @@ fn selection(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut
     let half = (r.w - 8.0) / 2.0;
     let left = r.take_left(half);
     r.take_left(8.0);
-    if n.is_dir() && widgets::button(ui, left, "Open in Map", ButtonKind::Secondary, true) {
+    if n.is_dir() && widgets::button_icon(ui, left, Some(Icon::Map), "Open in Map", ButtonKind::Secondary, true) {
         out.push(Action::Focus(id));
         out.push(Action::SetTab(Tab::Map));
     }
-    if widgets::button(ui, if n.is_dir() { r } else { Rect { w: r.right() - left.x, ..left } }, "Reveal in Finder", ButtonKind::Secondary, true) {
+    if widgets::button_icon(ui, if n.is_dir() { r } else { Rect { w: r.right() - left.x, ..left } }, Some(Icon::Reveal), "Reveal", ButtonKind::Secondary, true) {
         out.push(Action::Reveal(id));
     }
 }
@@ -170,7 +167,7 @@ fn reclaim_queue(ui: &mut Ui, ctx: &Ctx, area: Rect, out: &mut Vec<Action>) {
         row.take_left(18.0);
         ui.label(row, ctx.inv.name(id), theme::BODY, theme::TEXT, Align::Start);
         widgets::size_text(ui, size, ctx.inv.node(id).size(), theme::NUM, theme::TEXT_2, Align::End);
-        if widgets::icon_button(ui, x.inset_xy(0.0, 4.0), "×", false) {
+        if widgets::icon_button(ui, Rect::new(x.x, x.cy() - 11.0, 22.0, 22.0), Icon::Close, "", true) {
             out.push(Action::Unmark(id));
         } else if ui.clicked(r) {
             out.push(Action::Select(id));
@@ -182,7 +179,7 @@ fn reclaim_queue(ui: &mut Ui, ctx: &Ctx, area: Rect, out: &mut Vec<Action>) {
     let btn = Rect::new(area.x + theme::GUTTER, area.bottom() - 14.0 - 36.0, area.w - 2.0 * theme::GUTTER, 36.0);
     let running = matches!(ctx.commit, CommitState::Running { .. });
     let label = if running { "Moving to Trash…".to_string() } else { "Move to Trash…".to_string() };
-    if widgets::button(ui, btn, &label, ButtonKind::Reclaim, n > 0 && !running) {
+    if widgets::button_icon(ui, btn, Some(Icon::Trash), &label, ButtonKind::Reclaim, n > 0 && !running) {
         out.push(Action::AskCommit);
     }
 }

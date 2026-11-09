@@ -67,6 +67,23 @@ pub struct Transition {
     /// Clock start; zooming out waits for the new layout so it can aim.
     pub start: Option<Instant>,
     pub asked: Instant,
+    /// Progress already covered by a scroll preview, so a gesture flows
+    /// into the zoom without a jump.
+    pub pre: f32,
+}
+
+/// Scroll or pinch on the map, building toward a scope change (ADR-0010).
+/// `acc` is signed progress: +1 opens the scope under the pointer, -1 goes
+/// up. Once a step fires the gesture is `latched` until input goes quiet,
+/// so one flick (and its momentum tail) moves exactly one level.
+#[derive(Default)]
+pub struct Gesture {
+    pub acc: f32,
+    pub last_input: Option<Instant>,
+    pub last_frame: Option<Instant>,
+    pub latched: bool,
+    /// Preview progress handed to the transition a step starts.
+    pub handoff: f32,
 }
 
 pub const ZOOM_DURATION: f32 = 0.46;
@@ -92,6 +109,7 @@ pub struct ViewState {
     pub confirm: bool,
     pub toast: Option<Toast>,
     pub transition: Option<Transition>,
+    pub gesture: Gesture,
     /// What the pointer is over in the map: (entry, scope a click enters).
     pub map_hover: Option<(NodeId, NodeId)>,
     /// Smooth tree scrolling: (from, to, start).
@@ -122,6 +140,7 @@ impl Default for ViewState {
             confirm: false,
             toast: None,
             transition: None,
+            gesture: Gesture::default(),
             map_hover: None,
             tree_glide: None,
             tree_drag: None,
