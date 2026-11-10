@@ -25,13 +25,17 @@ pub struct Site {
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub max_iterations: usize,
-    /// Stop once `Σ|area - target| / total_area` falls below this.
+    /// Stop once `Σ|area - target| / total_area` falls below this...
     pub convergence: f64,
+    /// ...and no cell is off by more than this fraction of its own target,
+    /// so small cells cannot hide inside the total (a 12 MB file drawn ten
+    /// times too large is a rounding error overall, but a lie on screen).
+    pub max_relative: f64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { max_iterations: 80, convergence: 0.01 }
+        Settings { max_iterations: 80, convergence: 0.01, max_relative: 0.35 }
     }
 }
 
@@ -100,8 +104,24 @@ fn max_dist2(pts: &[Vec2], o: Vec2) -> f64 {
     pts.iter().map(|&p| (p - o).len2()).fold(0.0, f64::max)
 }
 
-fn area_error(cells: &[Polygon], targets: &[f64], total: f64) -> f64 {
-    cells.iter().zip(targets).map(|(c, t)| (c.area() - t).abs()).sum::<f64>() / total
+/// (absolute error `Σ|area - target| / total`, worst relative error).
+fn area_error(cells: &[Polygon], targets: &[f64], total: f64) -> (f64, f64) {
+    let mut abs = 0.0;
+    let mut rel: f64 = 0.0;
+    for (c, &t) in cells.iter().zip(targets) {
+        let d = (c.area() - t).abs();
+        abs += d;
+        if t > 0.0 {
+            rel = rel.max(d / t);
+        }
+    }
+    (abs / total, rel)
+}
+
+/// One number to compare solutions by: absolute error, with a small
+/// penalty for the worst cell so a solution fixing it counts as better.
+fn score((abs, rel): (f64, f64)) -> f64 {
+    abs + 0.002 * rel.min(50.0)
 }
 
 /// Keeps every site inside its own cell: `|wᵢ - wⱼ| ≤ |sᵢ - sⱼ|²`.
@@ -161,18 +181,27 @@ pub fn solve(container: &Polygon, values: &[f64], warm: Option<&[Site]>, seed: u
         return Solution::default();
     }
     if n == 1 {
-        return Solution { sites: vec![Site { pos: container.centroid(), weight: 0.0 }], cells: vec![container.clone()], error: 0.0, iterations: 0 };
+        // A positive weight keeps this usable as a warm start once
+        // siblings appear (weights are scaled multiplicatively).
+        return Solution { sites: vec![Site { pos: container.centroid(), weight: total * 0.5 }], cells: vec![container.clone()], error: 0.0, iterations: 0 };
     }
     let sum: f64 = values.iter().map(|v| v.max(0.0)).sum();
     let targets: Vec<f64> = if sum > 0.0 { values.iter().map(|v| v.max(0.0) / sum * total).collect() } else { vec![total / n as f64; n] };
 
+    // Weight updates are multiplicative, so a weight at (or near) zero can
+    // never recover: keep every weight on the scale of the cell areas.
+    let floor = total / n as f64 * 1e-6;
     let mut sites = match warm {
         Some(w) if w.len() == n => {
             let mut rng = SplitMix64::new(seed ^ 0x9e37_79b9);
+            // Degenerate weights (all ~0, or not finite) carry no layout:
+            // keep the positions, restart the weights.
+            let usable = w.iter().all(|s| s.weight.is_finite()) && w.iter().any(|s| s.weight > floor);
+            let fresh = total / n as f64 * 0.5;
             w.iter()
                 .map(|s| {
                     let pos = if container.contains(s.pos) { s.pos } else { container.random_point(&mut rng).unwrap_or(container.centroid()) };
-                    Site { pos, weight: s.weight.max(1e-9) }
+                    Site { pos, weight: if usable { s.weight.max(floor) } else { fresh } }
                 })
                 .collect()
         }
@@ -183,13 +212,13 @@ pub fn solve(container: &Polygon, values: &[f64], warm: Option<&[Site]>, seed: u
     let mut cells = Vec::with_capacity(n);
     power_diagram(container, &sites, &mut cells);
     let mut error = area_error(&cells, &targets, total);
-    let mut best = (error, sites.clone());
+    let mut best = (score(error), sites.clone());
 
     // Flicker mitigation: damp steps whenever the error grows again.
     let mut damping: f64 = 0.0;
     let mut max_ratio: f64 = 2.0;
     let mut iterations = 0;
-    while iterations < settings.max_iterations && error > settings.convergence {
+    while iterations < settings.max_iterations && (error.0 > settings.convergence || error.1 > settings.max_relative) {
         iterations += 1;
 
         // 1. Lloyd step: move sites toward their cell centroids.
@@ -207,30 +236,30 @@ pub fn solve(container: &Polygon, values: &[f64], warm: Option<&[Site]>, seed: u
             let a = c.area();
             let ratio = if a > 1e-12 { t / a } else { max_ratio };
             let ratio = ratio.clamp(1.0 / max_ratio, max_ratio);
-            s.weight = (s.weight * ratio).max(1e-9);
+            s.weight = (s.weight * ratio).max(floor);
         }
         handle_overweighted(&mut sites);
         power_diagram(container, &sites, &mut cells);
 
         let e = area_error(&cells, &targets, total);
-        if e > error {
+        if score(e) > score(error) {
             damping = (damping + 0.1).min(0.6);
             max_ratio = (max_ratio * 0.85).max(1.05);
         } else {
             damping *= 0.9;
         }
         error = e;
-        if error < best.0 {
-            best = (error, sites.clone());
+        if score(error) < best.0 {
+            best = (score(error), sites.clone());
         }
     }
 
-    if best.0 < error {
+    if best.0 < score(error) {
         sites = best.1;
         power_diagram(container, &sites, &mut cells);
-        error = best.0;
+        error = area_error(&cells, &targets, total);
     }
-    Solution { sites, cells, error, iterations }
+    Solution { sites, cells, error: error.0, iterations }
 }
 
 #[cfg(test)]
@@ -257,7 +286,7 @@ mod tests {
         let c = rect(1200.0, 800.0);
         let mut rng = SplitMix64::new(42);
         let values: Vec<f64> = (0..48).map(|_| (rng.next_f64() * 6.0).exp()).collect();
-        let sol = solve(&c, &values, None, 1, &Settings { max_iterations: 200, convergence: 0.02 });
+        let sol = solve(&c, &values, None, 1, &Settings { max_iterations: 200, convergence: 0.02, ..Settings::default() });
         assert!(sol.error < 0.05, "area error {} after {} its", sol.error, sol.iterations);
     }
 
@@ -273,6 +302,23 @@ mod tests {
         assert!(warm.iterations <= cold.iterations, "{} vs {}", warm.iterations, cold.iterations);
     }
 
+    /// One huge value next to a tiny one: the tiny cell must stay tiny,
+    /// both cold and from a degenerate warm start (all weights zero, as a
+    /// single-cell level used to record).
+    #[test]
+    fn extreme_ratios_keep_small_cells_small() {
+        let c = rect(1100.0, 1000.0);
+        let values = [25.0e9, 12.0e6];
+        let s = Settings { max_iterations: 120, convergence: 0.008, ..Settings::default() };
+        let zero = [Site { pos: Vec2::new(409.0, 388.0), weight: 0.0 }, Site { pos: Vec2::new(591.0, 175.0), weight: 0.0 }];
+        for warm in [None, Some(&zero[..])] {
+            let sol = solve(&c, &values, warm, 7, &s);
+            let small = sol.cells[1].area() / c.area();
+            let want = values[1] / values.iter().sum::<f64>();
+            assert!(small < want * 1.5, "small cell {small:.5} vs {want:.5} (warm: {})", warm.is_some());
+        }
+    }
+
     #[test]
     fn single_and_empty() {
         let c = rect(10.0, 10.0);
@@ -284,7 +330,7 @@ mod tests {
     fn works_in_circular_container() {
         let c = Polygon::circle(Vec2::new(0.0, 0.0), 200.0, 64);
         let values = [50.0, 20.0, 10.0, 8.0, 5.0, 4.0, 2.0, 1.0];
-        let sol = solve(&c, &values, None, 9, &Settings { max_iterations: 150, convergence: 0.01 });
+        let sol = solve(&c, &values, None, 9, &Settings { max_iterations: 150, convergence: 0.01, ..Settings::default() });
         assert!(sol.error < 0.03, "error {}", sol.error);
     }
 }

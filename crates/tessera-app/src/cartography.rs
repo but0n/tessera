@@ -203,7 +203,11 @@ impl Solver<'_> {
         let values: Vec<f64> = snaps.iter().map(|s| s.size as f64).collect();
         let keys: Vec<Key> = snaps.iter().map(|s| s.key).collect();
         let init = self.warm.lookup(parent, container, &keys);
-        let settings = if depth == 1 { Settings { max_iterations: 120, convergence: 0.008 } } else { Settings { max_iterations: 90, convergence: 0.015 } };
+        let settings = if depth == 1 {
+            Settings { max_iterations: 120, convergence: 0.008, ..Settings::default() }
+        } else {
+            Settings { max_iterations: 90, convergence: 0.015, ..Settings::default() }
+        };
         let sol = tessera_voronoi::solve(container, &values, init.as_deref(), parent.0 as u64, &settings);
         let (min, max) = container.bbox();
         self.next_warm.lock().0.insert(parent, WarmEntry { min, max, keys, sites: sol.sites.clone() });
@@ -384,5 +388,65 @@ mod tests {
         assert!((area - 1200.0 * 800.0).abs() < 1.0);
         let probe = l.cells.iter().find(|c| c.depth == 2).unwrap().polygon.centroid();
         assert_eq!(l.cells[l.hit(probe).unwrap()].depth, 2);
+    }
+
+    /// A folder that is one huge child plus a small file, entered from its
+    /// parent. There the file is too small to draw, so the folder shows a
+    /// single child, whose solution seeds the warm start (it used to record
+    /// weight 0, which froze the solver and drew the file at ~30%).
+    #[test]
+    fn skewed_scope_keeps_proportions() {
+        let mut inv = Inventory::new("/r");
+        let p = ScanPolicy::default();
+        let mut ino = 10u64;
+        let mut next_ino = || {
+            ino += 1;
+            ino
+        };
+        let mut l = Listing::default();
+        l.push("proj", EntryKind::Dir, 0, next_ino(), 1, false);
+        for i in 0..6 {
+            l.push(&format!("other{i}"), EntryKind::File, (i + 1) * 3_000_000_000, next_ino(), 1, false);
+        }
+        let mut next = vec![];
+        inv.ingest(NodeId::ROOT, &l, &p, &mut next);
+        let proj = next[0];
+        let mut l = Listing::default();
+        l.push("target", EntryKind::Dir, 0, next_ino(), 1, false);
+        l.push("embeddings.json", EntryKind::File, 3_000_000, next_ino(), 1, false);
+        for i in 0..30u64 {
+            l.push(&format!("f{i}.rs"), EntryKind::File, 8_000 + i * 100, next_ino(), 1, false);
+        }
+        let mut next = vec![];
+        inv.ingest(proj, &l, &p, &mut next);
+        let target = next[0];
+        let mut l = Listing::default();
+        l.push("debug", EntryKind::Dir, 0, next_ino(), 1, false);
+        l.push("release", EntryKind::Dir, 0, next_ino(), 1, false);
+        let mut next = vec![];
+        inv.ingest(target, &l, &p, &mut next);
+        for (k, &d) in next.iter().enumerate() {
+            let mut l = Listing::default();
+            for j in 0..40u64 {
+                l.push(&format!("x{j}"), EntryKind::File, (if k == 0 { 560_000_000 } else { 45_000_000 }) + j, next_ino(), 1, false);
+            }
+            inv.ingest(d, &l, &p, &mut vec![]);
+        }
+        let inv = Arc::new(RwLock::new(inv));
+        let params = MapParams::default();
+        let mut warm = WarmStart::default();
+        let req = |focus| MapRequest { inventory: inv.clone(), focus, width: 1100.0, height: 1000.0 };
+        let parent = compute(&req(NodeId::ROOT), &params, &mut warm);
+        let inside = parent.cells.iter().filter(|c| c.parent.is_some_and(|p| parent.cells[p as usize].node == proj)).count();
+        assert_eq!(inside, 1, "the file is too small to draw from the parent");
+        let l = compute(&req(proj), &params, &mut warm);
+        let total: f64 = l.cells.iter().filter(|c| c.depth == 1).map(|c| c.size as f64).sum();
+        for c in l.cells.iter().filter(|c| c.depth == 1) {
+            let want = c.size as f64 / total;
+            let got = c.polygon.area() / (1100.0 * 1000.0);
+            // Within 1.5x, give or take a few pixels for the tiniest cells.
+            let area = 1100.0 * 1000.0;
+            assert!((got - want).abs() < 0.01 && got * area < want * area * 1.5 + 200.0, "{:?}: area share {got:.5}, size share {want:.5}", c.kind);
+        }
     }
 }
