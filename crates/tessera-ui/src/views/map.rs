@@ -644,7 +644,9 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
     ui.layer = 1;
     cands.sort_by(|a, b| {
         let (ca, cb) = (&layout.cells[a.idx], &layout.cells[b.idx]);
-        b.first.cmp(&a.first).then(ca.depth.cmp(&cb.depth)).then(b.area.total_cmp(&a.area))
+        // Direct children of the scope first, always: they are what a
+        // click opens. Then the followed entry's path, then outer first.
+        (cb.depth == 1).cmp(&(ca.depth == 1)).then(b.first.cmp(&a.first)).then(ca.depth.cmp(&cb.depth)).then(b.area.total_cmp(&a.area))
     });
     let n = layout.cells.len();
     // Dominant child: fills its parent, which then shows only as a rim.
@@ -681,6 +683,9 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         if chain.len() > 1 && head.inradius < 30.0 {
             chain.truncate(1);
         }
+        // A direct child of the scope keeps its own name as the label; what
+        // fills it becomes a quiet line underneath instead.
+        let inner = if layout.cells[head.idx].depth == 1 && chain.len() > 1 { Some(chain.split_off(1)) } else { None };
         let end = *chain.last().unwrap();
         let cand = cand_of[end].map_or(head, |k| &cands[k]);
         let opacity = head.alpha.min(cand.alpha);
@@ -730,6 +735,10 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             let names: Vec<&str> = chain[..chain.len() - 1].iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
             ui.text.elide(&format!("{} ›", names.join(" › ")), &theme::MAP_PATH, max_w)
         });
+        let inner = inner.filter(|_| room >= 40.0).map(|v| {
+            let names: Vec<&str> = v.iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
+            ui.text.elide(&names.join(" › "), &theme::MAP_PATH, max_w)
+        });
         let wi = if icon.is_some() { isz + 4.0 } else { 0.0 };
         let wn = wi + ui.measure(&name, lv.name);
         let wp = path.as_ref().map_or(0.0, |p| ui.measure(p, theme::MAP_PATH));
@@ -737,8 +746,10 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         let ws = if with_size { ui.measure(&size, lv.num) } else { 0.0 };
         let lh = lv.name.line_height();
         let ph = if path.is_some() { theme::MAP_PATH.line_height() } else { 0.0 };
-        let h = ph + if with_size { lh + lv.num.line_height() } else { lh };
-        let w = wn.max(ws).max(wp);
+        let wq = inner.as_ref().map_or(0.0, |q| ui.measure(q, theme::MAP_PATH));
+        let qh = if inner.is_some() { theme::MAP_PATH.line_height() + 2.0 } else { 0.0 };
+        let h = ph + qh + if with_size { lh + lv.num.line_height() } else { lh };
+        let w = wn.max(ws).max(wp).max(wq);
         let x = (cx - w / 2.0).clamp(bounds.x + 8.0, (bounds.right() - w - 8.0).max(bounds.x + 8.0));
         let y = (cy - h / 2.0).clamp(bounds.y + 6.0, bounds.bottom() - h - 6.0);
         let r = Rect::new(x, y, w, h);
@@ -765,6 +776,10 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             // Level 1 carries its family colour; deeper sizes are quiet.
             let size_ink = if top.depth == 1 { theme::branch(head.hue) } else { alpha(theme::TEXT, 0.52) };
             ui.text(r.cx() - ws / 2.0, y + lh, &size, lv.num, alpha(size_ink, size_ink[3] * opacity));
+        }
+        if let Some(q) = &inner {
+            let qy = y + lh + if with_size { lv.num.line_height() } else { 0.0 } + 2.0;
+            ui.text(r.cx() - wq / 2.0, qy, q, theme::MAP_PATH, alpha(theme::TEXT, 0.5 * opacity));
         }
         // Folder names claim more room, so nested ones never stack up.
         placed.push(if frame { r.inset_xy(-18.0, -14.0) } else { r.inset(-4.0) });
