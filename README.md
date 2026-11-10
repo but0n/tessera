@@ -1,5 +1,7 @@
 # Tessera
 
+[![CI](https://github.com/but0n/tessera/actions/workflows/ci.yml/badge.svg)](https://github.com/but0n/tessera/actions/workflows/ci.yml)
+
 See where your disk went, and take it back.
 
 Tessera scans a folder very quickly, shows sizes as a **nested Voronoi map**
