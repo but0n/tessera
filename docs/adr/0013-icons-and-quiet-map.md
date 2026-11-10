@@ -94,6 +94,14 @@ zooms.
   over its child, and a child's name hidden behind its parent's. If the
   region has no room for the path line, it is named by the outer folder
   alone, so an inner name never appears out of context.
+- **Every cell that can hold a label gets one.** A label does not have to
+  sit at its cell's centroid. Placement tries the centroid, then up to 24
+  nearby positions, nearest first, and takes the first where the whole
+  label lies inside the cell polygon and clear of other labels. If the full
+  label does not fit, it retries with just the name. A level-1 name that
+  still has no place may overhang a narrow cell rather than vanish. Nothing
+  inside an unnamed level-1 folder is labelled, so a name never appears
+  without its context.
 - **Level 1 is never demoted.** A direct child of the scope is what a click
   opens, so its own name always stays the main label. When such a folder
   forms a chain, its label is the level-1 name, size and share, and a quiet

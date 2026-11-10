@@ -446,6 +446,8 @@ struct LabelCand {
     hue: u16,
     /// On the path to the followed entry: placed before everything else.
     first: bool,
+    /// The cell as drawn (screen space): labels must fit inside it.
+    shape: Polygon,
 }
 
 /// Draws the cells of `layout` through `s`. `hovered` is the cell under the
@@ -592,7 +594,16 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         let min_r = if c.kind == CellKind::File { 7.0 } else { 14.0 };
         if o > 0.8 && label_r >= min_r && !others {
             let first = chain.contains(&c.node);
-            labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i], first });
+            labels.push(LabelCand {
+                idx: i,
+                center: shape.centroid(),
+                inradius: label_r,
+                area: poly.area(),
+                alpha: smoothstep(0.8, 1.0, o),
+                hue: fam[i],
+                first,
+                shape: shape.clone(),
+            });
         }
     }
     place_labels(ui, ctx, layout, labels, s.clip);
@@ -629,6 +640,49 @@ fn level(depth: u8) -> Level {
         // Detail: a quiet name, only where there is room to spare.
         _ => Level { name: theme::MAP_L3, num: theme::MAP_L2_NUM, ink: 0.66, min_room: 22.0, size_room: None, share_room: None, halo: 0.0, icon: 11.0, icon_alone: 0.42 },
     }
+}
+
+/// A spot for a `w`×`h` label inside `shape`, free of `placed`: the centre
+/// if possible, else the nearest of a few positions around it.
+/// Without `strict` the label may overhang the cell (but not other labels).
+fn spot(shape: &Polygon, (cx, cy): (f32, f32), w: f32, h: f32, bounds: Rect, placed: &[Rect], strict: bool) -> Option<Rect> {
+    const STEPS: [(f32, f32); 25] = [
+        (0.0, 0.0),
+        (0.0, -1.0),
+        (0.0, 1.0),
+        (-1.0, 0.0),
+        (1.0, 0.0),
+        (-1.0, -1.0),
+        (1.0, -1.0),
+        (-1.0, 1.0),
+        (1.0, 1.0),
+        (0.0, -2.0),
+        (0.0, 2.0),
+        (-2.0, 0.0),
+        (2.0, 0.0),
+        (-1.0, -2.0),
+        (1.0, -2.0),
+        (-1.0, 2.0),
+        (1.0, 2.0),
+        (-2.0, -1.0),
+        (2.0, -1.0),
+        (-2.0, 1.0),
+        (2.0, 1.0),
+        (0.0, -3.0),
+        (0.0, 3.0),
+        (-2.0, -2.0),
+        (2.0, 2.0),
+    ];
+    let (sx, sy) = (w * 0.3 + 8.0, h * 0.6 + 6.0);
+    let inside = |x: f32, y: f32| shape.contains(Vec2::new(x as f64, y as f64));
+    STEPS.iter().find_map(|&(dx, dy)| {
+        let r = Rect::new(cx - w / 2.0 + dx * sx, cy - h / 2.0 + dy * sy, w, h);
+        let ok_bounds = r.x >= bounds.x + 4.0 && r.right() <= bounds.right() - 4.0 && r.y >= bounds.y + 2.0 && r.bottom() <= bounds.bottom() - 2.0;
+        // Glyph boxes carry some air: let them graze the edge a little.
+        let k = r.inset_xy(2.0, 3.0);
+        let fits = !strict || inside(k.x, k.y) && inside(k.right(), k.y) && inside(k.x, k.bottom()) && inside(k.right(), k.bottom());
+        (ok_bounds && fits && !placed.iter().any(|p| p.overlaps(&r))).then_some(r)
+    })
 }
 
 /// Labels styled by level (see [`Level`]): what does not fit is left to the
@@ -669,7 +723,14 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
     }
 
     let mut placed: Vec<Rect> = Vec::new();
+    // Level-1 folders that got a label; nothing inside an unnamed one is
+    // named either, so no name ever shows without its context.
+    let mut named = vec![false; n];
     for head in &cands {
+        let root = scope_of(layout, head.idx);
+        if root != head.idx && !named[root] {
+            continue;
+        }
         // Chain members are labelled through their head.
         if absorbed[head.idx] {
             continue;
@@ -718,24 +779,22 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             // Too small for a name: a file still shows what it is.
             if let Some(icon) = icon
                 && room >= isz * 0.5 + 3.0
+                && let Some(r) = spot(&cand.shape, (cx, cy), isz, isz, bounds, &placed, true)
             {
-                let r = Rect::new(cx - isz / 2.0, cy - isz / 2.0, isz, isz);
-                if !placed.iter().any(|p| p.overlaps(&r)) {
-                    ui.icon(r.x, r.y, isz, icon, alpha(theme::TEXT, lv.icon_alone * opacity));
-                    placed.push(r.inset(-2.0));
-                }
+                ui.icon(r.x, r.y, isz, icon, alpha(theme::TEXT, lv.icon_alone * opacity));
+                placed.push(r.inset(-2.0));
             }
             continue;
         }
         let name = name.unwrap_or_default();
-        let with_size = lv.size_room.is_some_and(|m| room >= m);
+        let mut with_size = lv.size_room.is_some_and(|m| room >= m);
         let with_share = lv.share_room.is_some_and(|m| room >= m) && chain.len() == 1;
         // The folders this cell fills, outermost first.
         let path = (chain.len() > 1).then(|| {
             let names: Vec<&str> = chain[..chain.len() - 1].iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
             ui.text.elide(&format!("{} ›", names.join(" › ")), &theme::MAP_PATH, max_w)
         });
-        let inner = inner.filter(|_| room >= 40.0).map(|v| {
+        let mut inner = inner.filter(|_| room >= 40.0).map(|v| {
             let names: Vec<&str> = v.iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
             ui.text.elide(&names.join(" › "), &theme::MAP_PATH, max_w)
         });
@@ -750,12 +809,20 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         let qh = if inner.is_some() { theme::MAP_PATH.line_height() + 2.0 } else { 0.0 };
         let h = ph + qh + if with_size { lh + lv.num.line_height() } else { lh };
         let w = wn.max(ws).max(wp).max(wq);
-        let x = (cx - w / 2.0).clamp(bounds.x + 8.0, (bounds.right() - w - 8.0).max(bounds.x + 8.0));
-        let y = (cy - h / 2.0).clamp(bounds.y + 6.0, bounds.bottom() - h - 6.0);
-        let r = Rect::new(x, y, w, h);
-        if placed.iter().any(|p| p.overlaps(&r)) {
-            continue;
+        // Find a free spot inside the cell, nearest its centre; failing
+        // that, try again with just the name.
+        let mut r = spot(&cand.shape, (cx, cy), w, h, bounds, &placed, true);
+        if r.is_none() && (with_size || inner.is_some()) {
+            r = spot(&cand.shape, (cx, cy), wn.max(wp), ph + lh, bounds, &placed, true);
+            with_size = false;
+            inner = None;
         }
+        // A scope's direct child is always named, even if it must overhang
+        // a narrow cell.
+        if r.is_none() && top.depth == 1 {
+            r = spot(&cand.shape, (cx, cy), wn.max(wp), ph + lh, bounds, &placed, false);
+        }
+        let Some(r) = r else { continue };
         if frame && lv.halo > 0.0 {
             // Over busy content: a soft dark halo, no hard pill.
             ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, lv.halo * opacity), 16.0, 12.0);
@@ -781,8 +848,9 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             let qy = y + lh + if with_size { lv.num.line_height() } else { 0.0 } + 2.0;
             ui.text(r.cx() - wq / 2.0, qy, q, theme::MAP_PATH, alpha(theme::TEXT, 0.5 * opacity));
         }
-        // Folder names claim more room, so nested ones never stack up.
-        placed.push(if frame { r.inset_xy(-18.0, -14.0) } else { r.inset(-4.0) });
+        named[head.idx] = true;
+        // Folder names keep a little air around them.
+        placed.push(if frame { r.inset_xy(-8.0, -5.0) } else { r.inset(-3.0) });
     }
     ui.layer = 0;
 }
