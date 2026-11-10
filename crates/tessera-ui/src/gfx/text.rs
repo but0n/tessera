@@ -72,24 +72,21 @@ pub struct IconItem {
     pub clip: Rect,
 }
 
-pub struct TextSystem {
-    fonts: FontSystem,
-    /// Empty buffer hosting icon glyphs.
-    blank: Buffer,
-    swash: SwashCache,
-    atlas: TextAtlas,
-    viewport: Viewport,
-    renderers: Vec<TextRenderer>,
-    cache: HashMap<Key, Shaped>,
-    elided: HashMap<(Key, u32), String>,
+/// The system's fonts, loaded and warmed up. Building this is pure CPU work
+/// (no GPU), so it can run on a background thread while the window and the
+/// device are being created.
+pub struct Fonts {
+    system: FontSystem,
     sans: String,
     mono: String,
-    scale: f32,
-    frame: u64,
 }
 
-impl TextSystem {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+impl Fonts {
+    /// Loads the font database and shapes a line in each of `styles`. A
+    /// font is only instantiated the first time one of its weights is
+    /// shaped, which takes tens of milliseconds; doing it here keeps that
+    /// out of the first frame each style appears in.
+    pub fn load(styles: &[TextStyle]) -> Fonts {
         let mut db = glyphon::fontdb::Database::new();
         db.load_system_fonts();
         let family_of = |file: &str| {
@@ -102,15 +99,57 @@ impl TextSystem {
         db.set_sans_serif_family(sans.clone());
         db.set_monospace_family(mono.clone());
         let locale = std::env::var("LANG").ok().and_then(|l| l.split('.').next().map(|s| s.replace('_', "-"))).unwrap_or_else(|| "en-US".into());
-        let fonts = FontSystem::new_with_locale_and_db(locale, db);
+        let mut fonts = Fonts { system: FontSystem::new_with_locale_and_db(locale, db), sans, mono };
+        for style in styles {
+            // Letters, figures and the symbols the chrome is set in.
+            fonts.shape("Ag 0.5 · … ⌘ ⌥ ↑↓←→", style, 1.0);
+        }
+        fonts
+    }
 
+    /// `text` set on one line in `style`, at `scale` physical pixels per point.
+    fn shape(&mut self, text: &str, style: &TextStyle, scale: f32) -> Buffer {
+        let mut buffer = Buffer::new(&mut self.system, Metrics::new(style.size * scale, style.line_height() * scale));
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(None, None);
+        let family = match style.font {
+            Font::Mono => Family::Name(&self.mono),
+            _ => Family::Name(&self.sans),
+        };
+        let mut attrs = Attrs::new().family(family).weight(Weight(style.weight));
+        if style.font == Font::Num {
+            let mut f = FontFeatures::new();
+            f.enable(FeatureTag::new(b"tnum"));
+            attrs = attrs.font_features(f);
+        }
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.system, false);
+        buffer
+    }
+}
+
+pub struct TextSystem {
+    fonts: Fonts,
+    /// Empty buffer hosting icon glyphs.
+    blank: Buffer,
+    swash: SwashCache,
+    atlas: TextAtlas,
+    viewport: Viewport,
+    renderers: Vec<TextRenderer>,
+    cache: HashMap<Key, Shaped>,
+    elided: HashMap<(Key, u32), String>,
+    scale: f32,
+    frame: u64,
+}
+
+impl TextSystem {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, mut fonts: Fonts) -> Self {
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::with_color_mode(device, queue, &cache, format, ColorMode::Web);
         let renderers = (0..LAYERS).map(|_| TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None)).collect();
-        let mut fonts = fonts;
-        let blank = Buffer::new(&mut fonts, Metrics::new(1.0, 1.0));
-        TextSystem { fonts, blank, swash: SwashCache::new(), atlas, viewport, renderers, cache: HashMap::new(), elided: HashMap::new(), sans, mono, scale: 1.0, frame: 0 }
+        let blank = Buffer::new(&mut fonts.system, Metrics::new(1.0, 1.0));
+        TextSystem { fonts, blank, swash: SwashCache::new(), atlas, viewport, renderers, cache: HashMap::new(), elided: HashMap::new(), scale: 1.0, frame: 0 }
     }
 
     pub fn begin_frame(&mut self, scale: f32) {
@@ -134,22 +173,7 @@ impl TextSystem {
         let frame = self.frame;
         let scale = self.scale;
         if !self.cache.contains_key(&key) {
-            let lh = style.line_height();
-            let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(style.size * scale, lh * scale));
-            buffer.set_wrap(Wrap::None);
-            buffer.set_size(None, None);
-            let family = match style.font {
-                Font::Mono => Family::Name(&self.mono),
-                _ => Family::Name(&self.sans),
-            };
-            let mut attrs = Attrs::new().family(family).weight(Weight(style.weight));
-            if style.font == Font::Num {
-                let mut f = FontFeatures::new();
-                f.enable(FeatureTag::new(b"tnum"));
-                attrs = attrs.font_features(f);
-            }
-            buffer.set_text(text, &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(&mut self.fonts, false);
+            let buffer = self.fonts.shape(text, style, scale);
             let width = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) / scale;
             self.cache.insert(key.clone(), Shaped { buffer, width, last_used: frame });
         }
@@ -230,7 +254,7 @@ impl TextSystem {
         }
         self.viewport.update(queue, Resolution { width: phys.0, height: phys.1 });
         let scale = self.scale;
-        let TextSystem { fonts, blank, swash, atlas, viewport, renderers, cache, .. } = self;
+        let TextSystem { fonts: Fonts { system: fonts, .. }, blank, swash, atlas, viewport, renderers, cache, .. } = self;
         let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         let color = |c: [f32; 4]| Color::rgba(to8(c[0]), to8(c[1]), to8(c[2]), to8(c[3]));
         let bounds = |r: &Rect| TextBounds {

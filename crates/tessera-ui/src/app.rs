@@ -2,6 +2,7 @@
 //! input → build UI (views emit actions) → render → apply actions.
 
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tessera_app::Workspace;
@@ -14,6 +15,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::gfx::Renderer;
+use crate::gfx::text::Fonts;
 use crate::state::{Action, Tab, Transition, ViewState, ZoomDir};
 use crate::theme;
 use crate::ui::{Frame, Input, Ui};
@@ -39,13 +41,15 @@ pub struct App {
     pub view: ViewState,
     input: Input,
     gfx: Option<Gfx>,
+    /// Fonts being loaded in the background while the window comes up.
+    pub fonts: Option<JoinHandle<Fonts>>,
     pub start: Instant,
     cursor: CursorIcon,
 }
 
 impl App {
     pub fn new(ws: Workspace, carto: Cartographer) -> App {
-        App { ws, carto, view: ViewState::default(), input: Input::default(), gfx: None, start: Instant::now(), cursor: CursorIcon::Default }
+        App { ws, carto, view: ViewState::default(), input: Input::default(), gfx: None, fonts: None, start: Instant::now(), cursor: CursorIcon::Default }
     }
 
     fn request_redraw(&self) {
@@ -65,12 +69,9 @@ impl App {
             self.fix_dangling();
         }
         let Some(gfx) = self.gfx.as_mut() else { return };
-        let scale = gfx.window.scale_factor() as f32;
-        let logical = (gfx.config.width as f32 / scale, gfx.config.height as f32 / scale);
-        let time = self.start.elapsed().as_secs_f32();
-        let mut actions = Vec::new();
-        let (frame, cursor, animating) = build_frame(&self.ws, &self.carto, &mut self.view, &self.input, &mut gfx.renderer, logical, scale, time, &mut actions);
-
+        // Acquire the target first. Building a frame consumes input (scroll
+        // deltas move things), so a frame that cannot be shown must not be
+        // built: its input would be applied again by the retry.
         let texture = match gfx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated => {
@@ -89,6 +90,12 @@ impl App {
                 return;
             }
         };
+        let scale = gfx.window.scale_factor() as f32;
+        let logical = (gfx.config.width as f32 / scale, gfx.config.height as f32 / scale);
+        let time = self.start.elapsed().as_secs_f32();
+        let mut actions = Vec::new();
+        let (frame, cursor, animating) = build_frame(&self.ws, &self.carto, &mut self.view, &self.input, &mut gfx.renderer, logical, scale, time, &mut actions);
+
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
         gfx.renderer.render(&frame, &view, (gfx.config.width, gfx.config.height), theme::BG);
         gfx.window.pre_present_notify();
@@ -129,8 +136,7 @@ impl App {
         }
         let inv_arc = self.ws.session.inventory().clone();
         let inv = inv_arc.read();
-        let source = Arc::as_ptr(&inv_arc) as usize;
-        let old = self.carto.latest().filter(|l| l.focus == view.focus && l.source == source);
+        let old = self.carto.latest().filter(|l| l.focus == view.focus && l.is_from(&inv_arc));
         if let Some(old) = old
             && view.tab == Tab::Map
         {
@@ -154,6 +160,10 @@ impl App {
             }
             let pre = if dir == ZoomDir::Fade { 0.0 } else { std::mem::take(&mut view.gesture.handoff) };
             view.transition = Some(Transition { old, dir, pivot, start: (dir == ZoomDir::In).then_some(now), asked: now, pre });
+        } else {
+            // Nothing to animate from. A transition still in flight was aimed
+            // at the scope being left; it must not play out over this one.
+            view.transition = None;
         }
         view.gesture.handoff = 0.0;
         view.focus = id;
@@ -249,8 +259,7 @@ pub fn build_frame(
     let inv_arc = ws.session.inventory().clone();
     let inv = inv_arc.read();
     let insights = ws.session.insights();
-    let source = Arc::as_ptr(&inv_arc) as usize;
-    let layout: Option<Arc<MapLayout>> = carto.latest().filter(|l| l.source == source);
+    let layout: Option<Arc<MapLayout>> = carto.latest().filter(|l| l.is_from(&inv_arc));
     let commit = ws.commit_state();
     let ctx = Ctx {
         inv: &inv,
@@ -309,7 +318,8 @@ impl ApplicationHandler<Wake> for App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
-        let renderer = Renderer::new(device, queue, format);
+        let fonts = self.fonts.take().and_then(|h| h.join().ok()).unwrap_or_else(|| Fonts::load(&theme::TEXT_STYLES));
+        let renderer = Renderer::new(device, queue, format, fonts);
         self.gfx = Some(Gfx { instance, surface, config, renderer, window });
         self.request_redraw();
     }
@@ -382,5 +392,49 @@ impl ApplicationHandler<Wake> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Wait);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_app::Services;
+    use tessera_app::cartography::{MapParams, MapRequest};
+    use tessera_domain::ScanPolicy;
+    use tessera_infra::{SampleReader, SampleTrash, SampleVolume, sample_root};
+
+    /// The sample tree, scanned, with the root's map solved.
+    fn app() -> App {
+        let waker: tessera_app::scan::Waker = Arc::new(|| {});
+        let services = Services { reader: Arc::new(SampleReader), trash: Arc::new(SampleTrash), volume: Arc::new(SampleVolume) };
+        let ws = Workspace::open(sample_root(), services, ScanPolicy::default(), waker.clone());
+        let mut app = App::new(ws, Cartographer::new(MapParams::default(), waker));
+        let wait = |done: &dyn Fn() -> bool| {
+            let t = Instant::now();
+            while !done() {
+                assert!(t.elapsed() < Duration::from_secs(20), "timed out");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait(&|| app.ws.session.is_finished());
+        app.carto.request(MapRequest { inventory: app.ws.session.inventory().clone(), focus: NodeId::ROOT, width: 900.0, height: 600.0 });
+        wait(&|| !app.carto.is_busy());
+        app.view.tab = Tab::Map;
+        app
+    }
+
+    #[test]
+    fn refocus_before_the_layout_arrives_drops_the_transition() {
+        let mut app = app();
+        let layout = app.carto.latest().expect("root layout");
+        let dir = layout.cells.iter().find(|c| c.depth == 1 && c.kind == CellKind::Dir).expect("a folder").node;
+        app.apply(Action::Focus(dir));
+        let tr = app.view.transition.as_ref().expect("zooms in");
+        assert!(tr.dir == ZoomDir::In && tr.pivot == dir);
+        // Back out before any layout of `dir` exists: there is nothing to
+        // zoom out of, and the zoom into `dir` must not go on playing.
+        app.apply(Action::FocusUp);
+        assert_eq!(app.view.focus, NodeId::ROOT);
+        assert!(app.view.transition.is_none());
     }
 }

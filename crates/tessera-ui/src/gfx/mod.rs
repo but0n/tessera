@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::ui::Frame;
-use text::TextSystem;
+use text::{Fonts, TextSystem};
 
 pub const LAYERS: usize = 3;
 
@@ -107,7 +107,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Renderer {
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat, fonts: Fonts) -> Renderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("shapes"), source: wgpu::ShaderSource::Wgsl(include_str!("shapes.wgsl").into()) });
         let globals = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("globals"),
@@ -165,7 +165,7 @@ impl Renderer {
         let cells = DynBuf::new(&device, "cells", wgpu::BufferUsages::VERTEX);
         let verts = DynBuf::new(&device, "cell verts", wgpu::BufferUsages::STORAGE);
         let bind_group = Self::bind(&device, &layout, &globals, &verts.buf);
-        let text = TextSystem::new(&device, &queue, format);
+        let text = TextSystem::new(&device, &queue, format, fonts);
         Renderer { device, queue, globals, layout, bind_group, quad_pipeline, cell_pipeline, quads, cells, verts, text }
     }
 

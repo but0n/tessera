@@ -23,6 +23,7 @@ use tessera_domain::ScanPolicy;
 use tessera_infra::{SampleReader, SampleTrash, SampleVolume, StatVfs, SystemTrash, best_reader, default_policy, home_dir, sample_root};
 use winit::event_loop::EventLoop;
 
+use crate::gfx::text::Fonts;
 use crate::state::Tab;
 
 const USAGE: &str = "usage: tessera [PATH | --sample] [--snapshot OUT.png [--view overview|map] [--size WxH] [--scale S] [--focus NAME] [--hover X,Y] [--select REL/PATH] [--click X,Y | --scroll X,Y,DY [--after MS]] [--demo]]";
@@ -106,6 +107,8 @@ fn main() {
         return;
     }
 
+    // Fonts take a while to load; do it while the window and GPU come up.
+    let fonts = std::thread::Builder::new().name("tessera-fonts".into()).spawn(|| Fonts::load(&theme::TEXT_STYLES)).expect("font thread");
     let event_loop = EventLoop::<app::Wake>::with_user_event().build().expect("event loop");
     let proxy = Mutex::new(event_loop.create_proxy());
     let waker: Waker = Arc::new(move || {
@@ -114,5 +117,6 @@ fn main() {
     let ws = Workspace::open(root, services, policy, waker.clone());
     let carto = Cartographer::new(MapParams::default(), waker);
     let mut app = app::App::new(ws, carto);
+    app.fonts = Some(fonts);
     event_loop.run_app(&mut app).expect("run");
 }
