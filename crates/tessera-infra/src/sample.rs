@@ -151,6 +151,7 @@ fn listing(kind: Kind, rng: &mut Rng) -> Vec<Entry> {
             v.push(dir("lumen-cli", Kind::Rust(0.4)));
             v.push(dir("sketches", Kind::Source(2)));
             v.push(file("backup-2025-06.tar.gz", 3 * GB + 410 * MB));
+            v.push(file("Screen Recording 2026-03-14 at 09.41.27.mov", 2 * GB + 640 * MB));
             v.push(file("notes.md", 18 * KB));
         }
         Kind::Rust(s) => {
