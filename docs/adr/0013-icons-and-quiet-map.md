@@ -94,6 +94,12 @@ zooms.
   over its child, and a child's name hidden behind its parent's. If the
   region has no room for the path line, it is named by the outer folder
   alone, so an inner name never appears out of context.
+- **Level 1 is never demoted.** A direct child of the scope is what a click
+  opens, so its own name always stays the main label. When such a folder
+  forms a chain, its label is the level-1 name, size and share, and a quiet
+  line underneath names what fills it (`tessera` / `5.27 GB · 31%` /
+  `target › release`). Level-1 labels are also placed first, before the
+  followed entry's path, so no other label can crowd them out.
 - A click opens one level *and* selects the entry that was clicked. A scroll
   remembers it as the *arrival*. That entry and its ancestors are labelled
   before anything else, the selection ring marks it, and it pulses once
