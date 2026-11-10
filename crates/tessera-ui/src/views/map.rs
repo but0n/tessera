@@ -597,8 +597,34 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
     ui.set_clip(prev);
 }
 
-/// Labels sized to their cell: big cells get big type and their size, small
-/// ones just a name, the smallest nothing (the tooltip has it).
+/// Typographic level of a map label (ADR-0013). Each nesting level has its
+/// own style, so a label's level reads at a glance whatever its cell's
+/// size; room only decides whether it shows and how many lines it gets.
+struct Level {
+    name: crate::gfx::text::TextStyle,
+    num: crate::gfx::text::TextStyle,
+    /// Opacity of the name.
+    ink: f32,
+    /// Least inradius (points) for the name, the size line and the share.
+    min_room: f32,
+    size_room: Option<f32>,
+    share_room: Option<f32>,
+    halo: f32,
+}
+
+fn level(depth: u8) -> Level {
+    match depth {
+        // The groups a click opens: name, size and share of the scope.
+        1 => Level { name: theme::MAP_L1, num: theme::MAP_L1_NUM, ink: 1.0, min_room: 18.0, size_room: Some(30.0), share_room: Some(52.0), halo: 0.5 },
+        // Their sub-groups: name and size.
+        2 => Level { name: theme::MAP_L2, num: theme::MAP_L2_NUM, ink: 0.88, min_room: 18.0, size_room: Some(40.0), share_room: None, halo: 0.32 },
+        // Detail: a quiet name, only where there is room to spare.
+        _ => Level { name: theme::MAP_L3, num: theme::MAP_L2_NUM, ink: 0.66, min_room: 22.0, size_room: None, share_room: None, halo: 0.0 },
+    }
+}
+
+/// Labels styled by level (see [`Level`]): what does not fit is left to the
+/// tooltip.
 ///
 /// A folder whose largest child covers most of it is, to the eye, that
 /// child: the folder shows only as a thin rim. Such chains get one label at
@@ -648,21 +674,19 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         let c: &MapCell = &layout.cells[end];
         let top = &layout.cells[head.idx];
         let full_name = ctx.inv.name(c.node);
-        // Deeper labels step down a size so the hierarchy reads in type too.
-        let room = cand.inradius as f32 * if top.depth == 1 { 1.0 } else { 0.78 };
-        let (style, with_size) = if room >= 68.0 {
-            (theme::MAP_L, true)
-        } else if room >= 38.0 {
-            (theme::MAP_M, true)
-        } else if room >= 17.0 {
-            (theme::MAP_S, false)
-        } else {
+        // The level sets the style; room only decides what fits. A region
+        // is labelled at the level of the folder it belongs to (the head).
+        let lv = level(top.depth);
+        let room = cand.inradius as f32;
+        if room < lv.min_room {
             continue;
-        };
+        }
+        let with_size = lv.size_room.is_some_and(|m| room >= m);
+        let with_share = lv.share_room.is_some_and(|m| room >= m) && chain.len() == 1;
         let (cx, cy) = (cand.center.x as f32, cand.center.y as f32);
         let frame = c.has_children || chain.len() > 1;
         let max_w = cand.inradius as f32 * if frame { 2.4 } else { 1.8 };
-        let name = ui.text.elide(full_name, &style, max_w);
+        let name = ui.text.elide(full_name, &lv.name, max_w);
         // A label cut down to a stub says nothing; leave the cell bare
         // (folders keep a shorter stub, they are worth naming).
         let (kept, total) = (name.chars().count().saturating_sub(1), full_name.chars().count());
@@ -674,13 +698,13 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             let names: Vec<&str> = chain[..chain.len() - 1].iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
             ui.text.elide(&format!("{} ›", names.join(" › ")), &theme::MAP_PATH, max_w)
         });
-        let wn = ui.measure(&name, style);
+        let wn = ui.measure(&name, lv.name);
         let wp = path.as_ref().map_or(0.0, |p| ui.measure(p, theme::MAP_PATH));
-        let size = ByteSize(c.size).to_string();
-        let ws = if with_size { ui.measure(&size, theme::MAP_NUM) } else { 0.0 };
-        let lh = style.line_height();
+        let size = if with_share { format!("{} · {}", ByteSize(c.size), widgets::percent(c.share)) } else { ByteSize(c.size).to_string() };
+        let ws = if with_size { ui.measure(&size, lv.num) } else { 0.0 };
+        let lh = lv.name.line_height();
         let ph = if path.is_some() { theme::MAP_PATH.line_height() } else { 0.0 };
-        let h = ph + if with_size { lh + 14.0 } else { lh };
+        let h = ph + if with_size { lh + lv.num.line_height() } else { lh };
         let w = wn.max(ws).max(wp);
         let x = (cx - w / 2.0).clamp(bounds.x + 8.0, (bounds.right() - w - 8.0).max(bounds.x + 8.0));
         let y = (cy - h / 2.0).clamp(bounds.y + 6.0, bounds.bottom() - h - 6.0);
@@ -688,10 +712,9 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         if placed.iter().any(|p| p.overlaps(&r)) {
             continue;
         }
-        if frame {
+        if frame && lv.halo > 0.0 {
             // Over busy content: a soft dark halo, no hard pill.
-            let halo = if c.has_children { if top.depth == 1 { 0.5 } else { 0.38 } } else { 0.28 };
-            ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, halo * opacity), 16.0, 12.0);
+            ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, lv.halo * opacity), 16.0, 12.0);
         }
         let mut y = r.y;
         if let Some(p) = &path {
@@ -700,11 +723,11 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             ui.text(r.cx() - wp / 2.0, y, p, theme::MAP_PATH, alpha(ink, ink[3] * opacity));
             y += ph;
         }
-        let ink = if frame { theme::TEXT } else { alpha(theme::TEXT, 0.94) };
-        ui.text(r.cx() - wn / 2.0, y, &name, style, alpha(ink, ink[3] * opacity));
+        ui.text(r.cx() - wn / 2.0, y, &name, lv.name, alpha(theme::TEXT, lv.ink * opacity));
         if with_size {
-            let size_ink = if c.has_children { theme::branch(cand.hue) } else { alpha(theme::TEXT, 0.58) };
-            ui.text(r.cx() - ws / 2.0, y + lh, &size, theme::MAP_NUM, alpha(size_ink, size_ink[3] * opacity));
+            // Level 1 carries its family colour; deeper sizes are quiet.
+            let size_ink = if top.depth == 1 { theme::branch(head.hue) } else { alpha(theme::TEXT, 0.52) };
+            ui.text(r.cx() - ws / 2.0, y + lh, &size, lv.num, alpha(size_ink, size_ink[3] * opacity));
         }
         // Folder names claim more room, so nested ones never stack up.
         placed.push(if frame { r.inset_xy(-18.0, -14.0) } else { r.inset(-4.0) });

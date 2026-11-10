@@ -50,15 +50,21 @@ strings on a 24-unit grid.
   the light comes from above with a top-edge bevel (`fs_cell`).
 - *Small items* cells carry a fine dot texture and a muted folder tone, and
   inherit the mark state of their folder.
-- **Labels are sized by room.** A cell's inradius picks the style:
-  - 15 pt with its size;
-  - 12.5 pt with its size;
-  - 11 pt, name only;
-  - nothing.
-  Deeper cells drop one step. Stubs, and file names shortened to less than
-  70% of their length, are not drawn. Folders that show their contents
-  float their name on a soft halo instead of a pill. The tooltip carries the
-  detail: icon, name, size, path, share bar, and what a click opens.
+- **Labels are styled by level.** Room only decides *whether* a label shows
+  and how many lines it gets, never its style. A region is labelled at the
+  level of the folder it belongs to (`views::map::Level`, tokens
+  `MAP_L1`–`MAP_L3`):
+
+  | Level | Role | Name | Second line | Shown from (inradius) |
+  |---|---|---|---|---|
+  | 1 | the groups a click opens | 15 pt bold, white | size · share of scope, in the family colour | 18 pt (size from 30, share from 52) |
+  | 2 | sub-groups | 12 pt semibold, 88% | size, dimmed | 18 pt (size from 40) |
+  | 3 | detail | 10.5 pt regular, 66% | none | 22 pt |
+
+  Folders showing their contents float the name on a soft halo (level 1
+  strongest, level 3 none), never a pill. Stubs, and file names shortened to
+  less than 70% of their length, are not drawn. The tooltip carries the
+  rest: icon, name, size, path, share bar, and what a click opens.
 
 **Continuity through a step.** A name must not vanish or jump when the map
 zooms.
