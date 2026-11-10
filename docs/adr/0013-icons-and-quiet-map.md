@@ -62,8 +62,22 @@ strings on a 24-unit grid.
   | 3 | detail | 10.5 pt regular, 66% | none | 22 pt |
 
   Folders showing their contents float the name on a soft halo (level 1
-  strongest, level 3 none), never a pill. Stubs, and file names shortened to
-  less than 70% of their length, are not drawn. The tooltip carries the
+  strongest, level 3 none), never a pill. Folder names that would be cut to a
+  stub are not drawn.
+- **Files wear their type.** A file's label starts with its category icon
+  (video, image, archive, data…), sized per level, while folders are plain
+  names. The icon tells the two apart at a glance. A file name that does not
+  fit is shortened in steps:
+  1. full name;
+  2. without the extension, once the icon shows the type
+     (`A034_C006.mp4` → `A034_C006`);
+  3. for names of 14 or more characters, cut in the middle so the end
+     survives (`ubuntu-24.0…p-arm64`), keeping at least 10 characters;
+  4. the icon alone.
+
+  Cutting short codes leaves noise, so they skip step 3. Files too small for
+  any name still show their icon, faint at level 3, so a folder of videos
+  reads as videos. The tooltip carries the
   rest: icon, name, size, path, share bar, and what a click opens.
 
 **Continuity through a step.** A name must not vanish or jump when the map
@@ -77,7 +91,9 @@ zooms.
   actually seen (`target 17.7 GB`), and a small path above it names the
   folders around it (`aurora-engine ›`). A top-level folder in that path keeps its
   family colour. This avoids both failure modes: a parent's name printed
-  over its child, and a child's name hidden behind its parent's.
+  over its child, and a child's name hidden behind its parent's. If the
+  region has no room for the path line, it is named by the outer folder
+  alone, so an inner name never appears out of context.
 - A click opens one level *and* selects the entry that was clicked. A scroll
   remembers it as the *arrival*. That entry and its ancestors are labelled
   before anything else, the selection ring marks it, and it pulses once

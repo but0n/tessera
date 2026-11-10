@@ -588,7 +588,9 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
         // Folders are labelled at every depth, outermost first: the name on
         // screen is the folder a click opens, and it keeps its label as the
         // zoom brings it closer.
-        if o > 0.8 && label_r >= 14.0 && !others {
+        // Files can show just their icon, so they qualify smaller.
+        let min_r = if c.kind == CellKind::File { 7.0 } else { 14.0 };
+        if o > 0.8 && label_r >= min_r && !others {
             let first = chain.contains(&c.node);
             labels.push(LabelCand { idx: i, center: shape.centroid(), inradius: label_r, area: poly.area(), alpha: smoothstep(0.8, 1.0, o), hue: fam[i], first });
         }
@@ -610,16 +612,22 @@ struct Level {
     size_room: Option<f32>,
     share_room: Option<f32>,
     halo: f32,
+    /// File-type icon beside a file's name (or alone, when no name fits).
+    icon: f32,
+    /// Opacity of an icon shown without a name.
+    icon_alone: f32,
 }
 
 fn level(depth: u8) -> Level {
     match depth {
         // The groups a click opens: name, size and share of the scope.
-        1 => Level { name: theme::MAP_L1, num: theme::MAP_L1_NUM, ink: 1.0, min_room: 18.0, size_room: Some(30.0), share_room: Some(52.0), halo: 0.5 },
+        1 => {
+            Level { name: theme::MAP_L1, num: theme::MAP_L1_NUM, ink: 1.0, min_room: 18.0, size_room: Some(30.0), share_room: Some(52.0), halo: 0.5, icon: 15.0, icon_alone: 0.85 }
+        }
         // Their sub-groups: name and size.
-        2 => Level { name: theme::MAP_L2, num: theme::MAP_L2_NUM, ink: 0.88, min_room: 18.0, size_room: Some(40.0), share_room: None, halo: 0.32 },
+        2 => Level { name: theme::MAP_L2, num: theme::MAP_L2_NUM, ink: 0.88, min_room: 18.0, size_room: Some(40.0), share_room: None, halo: 0.32, icon: 12.5, icon_alone: 0.7 },
         // Detail: a quiet name, only where there is room to spare.
-        _ => Level { name: theme::MAP_L3, num: theme::MAP_L2_NUM, ink: 0.66, min_room: 22.0, size_room: None, share_room: None, halo: 0.0 },
+        _ => Level { name: theme::MAP_L3, num: theme::MAP_L2_NUM, ink: 0.66, min_room: 22.0, size_room: None, share_room: None, halo: 0.0, icon: 11.0, icon_alone: 0.42 },
     }
 }
 
@@ -668,6 +676,11 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         while let Some(d) = dominant[*chain.last().unwrap()] {
             chain.push(d);
         }
+        // Without room for the path line, an inner name would be out of
+        // context: name the outer folder instead.
+        if chain.len() > 1 && head.inradius < 30.0 {
+            chain.truncate(1);
+        }
         let end = *chain.last().unwrap();
         let cand = cand_of[end].map_or(head, |k| &cands[k]);
         let opacity = head.alpha.min(cand.alpha);
@@ -678,27 +691,47 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         // is labelled at the level of the folder it belongs to (the head).
         let lv = level(top.depth);
         let room = cand.inradius as f32;
-        if room < lv.min_room {
-            continue;
-        }
-        let with_size = lv.size_room.is_some_and(|m| room >= m);
-        let with_share = lv.share_room.is_some_and(|m| room >= m) && chain.len() == 1;
         let (cx, cy) = (cand.center.x as f32, cand.center.y as f32);
         let frame = c.has_children || chain.len() > 1;
         let max_w = cand.inradius as f32 * if frame { 2.4 } else { 1.8 };
-        let name = ui.text.elide(full_name, &lv.name, max_w);
-        // A label cut down to a stub says nothing; leave the cell bare
-        // (folders keep a shorter stub, they are worth naming).
-        let (kept, total) = (name.chars().count().saturating_sub(1), full_name.chars().count());
-        if name.ends_with('…') && (kept < total.min(6) || (!frame && c.kind == CellKind::File && (kept as f32) < total as f32 * 0.7)) {
+        // Files carry their type as an icon; folders are plain names.
+        let file = (c.kind == CellKind::File).then(|| ctx.inv.node(c.node));
+        let icon = file.map(widgets::kind_icon);
+        let isz = lv.icon;
+        let text_w = if icon.is_some() { max_w - isz - 4.0 } else { max_w };
+        let name = match file {
+            _ if room < lv.min_room => None,
+            Some(n) => file_name(ui, full_name, n.category() != tessera_domain::Category::Other, &lv.name, text_w),
+            None => {
+                let name = ui.text.elide(full_name, &lv.name, text_w);
+                // A label cut down to a stub says nothing; leave it bare.
+                let (kept, total) = (name.chars().count().saturating_sub(1), full_name.chars().count());
+                (!name.ends_with('…') || kept >= total.min(6)).then_some(name)
+            }
+        };
+        if name.is_none() {
+            // Too small for a name: a file still shows what it is.
+            if let Some(icon) = icon
+                && room >= isz * 0.5 + 3.0
+            {
+                let r = Rect::new(cx - isz / 2.0, cy - isz / 2.0, isz, isz);
+                if !placed.iter().any(|p| p.overlaps(&r)) {
+                    ui.icon(r.x, r.y, isz, icon, alpha(theme::TEXT, lv.icon_alone * opacity));
+                    placed.push(r.inset(-2.0));
+                }
+            }
             continue;
         }
+        let name = name.unwrap_or_default();
+        let with_size = lv.size_room.is_some_and(|m| room >= m);
+        let with_share = lv.share_room.is_some_and(|m| room >= m) && chain.len() == 1;
         // The folders this cell fills, outermost first.
-        let path = (chain.len() > 1 && room >= 30.0).then(|| {
+        let path = (chain.len() > 1).then(|| {
             let names: Vec<&str> = chain[..chain.len() - 1].iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
             ui.text.elide(&format!("{} ›", names.join(" › ")), &theme::MAP_PATH, max_w)
         });
-        let wn = ui.measure(&name, lv.name);
+        let wi = if icon.is_some() { isz + 4.0 } else { 0.0 };
+        let wn = wi + ui.measure(&name, lv.name);
         let wp = path.as_ref().map_or(0.0, |p| ui.measure(p, theme::MAP_PATH));
         let size = if with_share { format!("{} · {}", ByteSize(c.size), widgets::percent(c.share)) } else { ByteSize(c.size).to_string() };
         let ws = if with_size { ui.measure(&size, lv.num) } else { 0.0 };
@@ -723,7 +756,11 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
             ui.text(r.cx() - wp / 2.0, y, p, theme::MAP_PATH, alpha(ink, ink[3] * opacity));
             y += ph;
         }
-        ui.text(r.cx() - wn / 2.0, y, &name, lv.name, alpha(theme::TEXT, lv.ink * opacity));
+        let nx = r.cx() - wn / 2.0;
+        if let Some(icon) = icon {
+            ui.icon(nx, y + (lh - isz) / 2.0, isz, icon, alpha(theme::TEXT, lv.ink * 0.8 * opacity));
+        }
+        ui.text(nx + wi, y, &name, lv.name, alpha(theme::TEXT, lv.ink * opacity));
         if with_size {
             // Level 1 carries its family colour; deeper sizes are quiet.
             let size_ink = if top.depth == 1 { theme::branch(head.hue) } else { alpha(theme::TEXT, 0.52) };
@@ -733,6 +770,29 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
         placed.push(if frame { r.inset_xy(-18.0, -14.0) } else { r.inset(-4.0) });
     }
     ui.layer = 0;
+}
+
+/// The most telling form of a file name that fits `max_w`: in full; else
+/// without its extension when the icon already shows the type; else, for
+/// long names, shortened in the middle so the end (dates, take numbers)
+/// survives. `None` leaves just the icon.
+fn file_name(ui: &mut Ui, name: &str, typed: bool, style: &crate::gfx::text::TextStyle, max_w: f32) -> Option<String> {
+    if ui.measure(name, *style) <= max_w {
+        return Some(name.to_owned());
+    }
+    let stem = match name.rsplit_once('.') {
+        Some((stem, ext)) if typed && !stem.is_empty() && ext.len() <= 5 => stem,
+        _ => name,
+    };
+    if ui.measure(stem, *style) <= max_w {
+        return Some(stem.to_owned());
+    }
+    // Cutting a short code (A016_C000) leaves noise; the icon says enough.
+    let n = stem.chars().count();
+    if n < 14 {
+        return None;
+    }
+    ui.text.elide_middle(stem, style, max_w, 10)
 }
 
 /// Pointer over cell `i`. A click opens its scope (the depth-1 folder it

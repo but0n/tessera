@@ -192,6 +192,31 @@ impl TextSystem {
         out
     }
 
+    /// `text` shortened in the middle to fit `max_w`, keeping its end (where
+    /// file names differ: take numbers, extensions). `None` if fewer than
+    /// `min_chars` characters would survive.
+    pub fn elide_middle(&mut self, text: &str, style: &TextStyle, max_w: f32, min_chars: usize) -> Option<String> {
+        if self.measure(text, style) <= max_w {
+            return Some(text.to_owned());
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let build = |k: usize| {
+            let tail = k * 2 / 5;
+            let head = k - tail;
+            let mut s: String = chars[..head].iter().collect::<String>().trim_end().to_owned();
+            s.push('…');
+            s.extend(&chars[chars.len() - tail..]);
+            s
+        };
+        // Largest k (characters kept) that fits.
+        let (mut lo, mut hi) = (0usize, chars.len().saturating_sub(1));
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if self.measure(&build(mid), style) <= max_w { lo = mid } else { hi = mid - 1 }
+        }
+        (lo >= min_chars).then(|| build(lo))
+    }
+
     /// Makes sure everything referenced by `frame` is shaped (call before prepare).
     pub fn ensure(&mut self, text: &str, style: &TextStyle) {
         self.shaped(text, style);
