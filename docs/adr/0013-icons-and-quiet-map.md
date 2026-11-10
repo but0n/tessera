@@ -50,24 +50,39 @@ strings on a 24-unit grid.
   the light comes from above with a top-edge bevel (`fs_cell`).
 - *Small items* cells carry a fine dot texture and a muted folder tone, and
   inherit the mark state of their folder.
-- **Labels are styled by level.** Room only decides *whether* a label shows
-  and how many lines it gets, never its style. A region is labelled at the
-  level of the folder it belongs to (`views::map::Level`, tokens
-  `MAP_L1`–`MAP_L3`):
+- **Labels show the tree: placement says *what*, style says *how deep*.**
+  This follows the cartographic split between region names and place
+  names.
+  - A folder showing its contents is a **title**, set as high inside its
+    region as it fits, on one line with its glyph and size
+    (`▣ footage  175 GB · 52%`). A title at the top of an area reads as
+    "this area is that folder".
+  - Everything else is an **item**, centred in its cell, with its size
+    underneath when there is room. It reads as "one thing in here".
+  - Each nesting level has its own style (`views::map::Level`, tokens
+    `MAP_L1`–`MAP_L3`), so the level of any label reads at a glance,
+    whatever its cell's size. Room only decides whether it shows and how
+    much of it:
 
-  | Level | Role | Name | Second line | Shown from (inradius) |
-  |---|---|---|---|---|
-  | 1 | the groups a click opens | 15 pt bold, white | size · share of scope, in the family colour | 18 pt (size from 30, share from 52) |
-  | 2 | sub-groups | 12 pt semibold, 88% | size, dimmed | 18 pt (size from 40) |
-  | 3 | detail | 10.5 pt regular, 66% | none | 22 pt |
+    | Level | Name | Glyph | Size line | Shown from (inradius) |
+    |---|---|---|---|---|
+    | 1, the scope's children | 14.5 pt bold, white | solid folder in the family colour | size · share of the scope, family colour | 16 pt (size 26, share 44) |
+    | 2 | 12 pt semibold, 86% | outline folder | size, dimmed | 16 pt (size 34) |
+    | 3 | 10.5 pt regular, 62% | none (files: type icon) | none | 20 pt |
 
-  Folders showing their contents float the name on a soft halo (level 1
-  strongest, level 3 none), never a pill. Folder names that would be cut to a
-  stub are not drawn.
+  - Hovering a cell lights the titles of every folder containing it and
+    dims the other labels to 72%, which traces the cell's place in the
+    tree.
+  - Titles keep a soft dark halo (level 1 strongest, level 3 none); there
+    are no pills. Folder names that would be cut to a stub are not drawn.
+  - Because a parent's title sits at the top of its region and its child's
+    label sits at the child's centre, a folder filled by one child shows
+    both names without either covering the other (`aurora-engine` over `target`).
+    The earlier merged "chain" labels are gone.
 - **Files wear their type.** A file's label starts with its category icon
-  (video, image, archive, data…), sized per level, while folders are plain
-  names. The icon tells the two apart at a glance. A file name that does not
-  fit is shortened in steps:
+  (video, image, archive, data…), sized per level, while folders carry the
+  folder glyph of their level. A file name that does not fit is shortened
+  in steps:
   1. full name;
   2. without the extension, once the icon shows the type
      (`A034_C006.mp4` → `A034_C006`);
@@ -75,39 +90,23 @@ strings on a 24-unit grid.
      survives (`ubuntu-24.0…p-arm64`), keeping at least 10 characters;
   4. the icon alone.
 
-  Cutting short codes leaves noise, so they skip step 3. Files too small for
-  any name still show their icon, faint at level 3, so a folder of videos
-  reads as videos. The tooltip carries the
-  rest: icon, name, size, path, share bar, and what a click opens.
+  Short codes skip step 3. Files too small for any name still show their
+  icon, faint at level 3, so a folder of videos reads as videos.
 
 **Continuity through a step.** A name must not vanish or jump when the map
 zooms.
 - Folders are labelled at *every* depth, outermost first, so the name on
   screen is the folder a click opens next, and it keeps its label as the
   zoom brings it closer.
-- **Chains.** When a folder's largest child fills at least 70% of it, the
-  folder shows only as a thin rim, and to the eye the region *is* the child.
-  The whole chain gets one label at the child: the main line names the cell
-  actually seen (`target 17.7 GB`), and a small path above it names the
-  folders around it (`aurora-engine ›`). A top-level folder in that path keeps its
-  family colour. This avoids both failure modes: a parent's name printed
-  over its child, and a child's name hidden behind its parent's. If the
-  region has no room for the path line, it is named by the outer folder
-  alone, so an inner name never appears out of context.
-- **Every cell that can hold a label gets one.** A label does not have to
-  sit at its cell's centroid. Placement tries the centroid, then up to 24
-  nearby positions, nearest first, and takes the first where the whole
-  label lies inside the cell polygon and clear of other labels. If the full
-  label does not fit, it retries with just the name. A level-1 name that
+- **Every cell that can hold a label gets one.** A title searches
+  downward from the top of its region; an item tries its centroid, then up
+  to 24 nearby positions, nearest first. Each takes the first spot where
+  the whole label lies inside the cell polygon and clear of other labels.
+  If the full label does not fit, it retries with just the name. The
+  scope's children are placed first. A level-1 name that
   still has no place may overhang a narrow cell rather than vanish. Nothing
   inside an unnamed level-1 folder is labelled, so a name never appears
   without its context.
-- **Level 1 is never demoted.** A direct child of the scope is what a click
-  opens, so its own name always stays the main label. When such a folder
-  forms a chain, its label is the level-1 name, size and share, and a quiet
-  line underneath names what fills it (`aurora-engine` / `20.9 GB · 6.1%` /
-  `target › debug`). Level-1 labels are also placed first, before the
-  followed entry's path, so no other label can crowd them out.
 - A click opens one level *and* selects the entry that was clicked. A scroll
   remembers it as the *arrival*. That entry and its ancestors are labelled
   before anything else, the selection ring marks it, and it pulses once

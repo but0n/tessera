@@ -15,6 +15,7 @@ use super::Ctx;
 use super::widgets;
 use crate::gfx::cell_flags;
 use crate::gfx::icons::Icon;
+use crate::gfx::text::TextStyle;
 use crate::state::{Action, FADE_DURATION, Transition, ViewState, ZOOM_DURATION, ZOOM_PATIENCE, ZoomDir};
 use crate::theme::{self, Tone, alpha};
 use crate::ui::{Align, Rect, Ui, ease_in_out, ease_out};
@@ -606,45 +607,87 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
             });
         }
     }
-    place_labels(ui, ctx, layout, labels, s.clip);
+    place_labels(ui, ctx, layout, labels, s.clip, hovered);
     ui.set_clip(prev);
 }
 
 /// Typographic level of a map label (ADR-0013). Each nesting level has its
-/// own style, so a label's level reads at a glance whatever its cell's
-/// size; room only decides whether it shows and how many lines it gets.
+/// own style, so depth reads in the type whatever a cell's size; room only
+/// decides whether a label shows and how much of it.
 struct Level {
-    name: crate::gfx::text::TextStyle,
-    num: crate::gfx::text::TextStyle,
+    name: TextStyle,
+    num: TextStyle,
     /// Opacity of the name.
     ink: f32,
-    /// Least inradius (points) for the name, the size line and the share.
+    /// Least inradius (points) for the name, the size and the share.
     min_room: f32,
     size_room: Option<f32>,
     share_room: Option<f32>,
-    halo: f32,
-    /// File-type icon beside a file's name (or alone, when no name fits).
+    /// Folder glyph (solid at level 1, outline at level 2, none deeper).
+    folder: Option<Icon>,
     icon: f32,
-    /// Opacity of an icon shown without a name.
+    /// Opacity of a file icon shown without a name.
     icon_alone: f32,
+    halo: f32,
 }
 
 fn level(depth: u8) -> Level {
     match depth {
         // The groups a click opens: name, size and share of the scope.
-        1 => {
-            Level { name: theme::MAP_L1, num: theme::MAP_L1_NUM, ink: 1.0, min_room: 18.0, size_room: Some(30.0), share_room: Some(52.0), halo: 0.5, icon: 15.0, icon_alone: 0.85 }
-        }
-        // Their sub-groups: name and size.
-        2 => Level { name: theme::MAP_L2, num: theme::MAP_L2_NUM, ink: 0.88, min_room: 18.0, size_room: Some(40.0), share_room: None, halo: 0.32, icon: 12.5, icon_alone: 0.7 },
-        // Detail: a quiet name, only where there is room to spare.
-        _ => Level { name: theme::MAP_L3, num: theme::MAP_L2_NUM, ink: 0.66, min_room: 22.0, size_room: None, share_room: None, halo: 0.0, icon: 11.0, icon_alone: 0.42 },
+        1 => Level {
+            name: theme::MAP_L1,
+            num: theme::MAP_L1_NUM,
+            ink: 1.0,
+            min_room: 16.0,
+            size_room: Some(26.0),
+            share_room: Some(44.0),
+            folder: Some(Icon::FolderFill),
+            icon: 15.0,
+            icon_alone: 0.85,
+            halo: 0.5,
+        },
+        // What they hold: name and size.
+        2 => Level {
+            name: theme::MAP_L2,
+            num: theme::MAP_L2_NUM,
+            ink: 0.86,
+            min_room: 16.0,
+            size_room: Some(34.0),
+            share_room: None,
+            folder: Some(Icon::Folder),
+            icon: 12.5,
+            icon_alone: 0.7,
+            halo: 0.32,
+        },
+        // Detail: a quiet name where there is room to spare.
+        _ => Level {
+            name: theme::MAP_L3,
+            num: theme::MAP_L2_NUM,
+            ink: 0.62,
+            min_room: 20.0,
+            size_room: None,
+            share_room: None,
+            folder: None,
+            icon: 11.0,
+            icon_alone: 0.42,
+            halo: 0.0,
+        },
     }
 }
 
-/// A spot for a `w`×`h` label inside `shape`, free of `placed`: the centre
-/// if possible, else the nearest of a few positions around it.
-/// Without `strict` the label may overhang the cell (but not other labels).
+/// `r` lies inside `shape` (or, without `strict`, at least in the map)
+/// and clear of `placed`.
+fn free(shape: &Polygon, r: Rect, bounds: Rect, placed: &[Rect], strict: bool) -> bool {
+    let in_bounds = r.x >= bounds.x + 4.0 && r.right() <= bounds.right() - 4.0 && r.y >= bounds.y + 2.0 && r.bottom() <= bounds.bottom() - 2.0;
+    // Glyph boxes carry some air: let them graze the edge a little.
+    let k = r.inset_xy(2.0, 3.0);
+    let inside = |x: f32, y: f32| shape.contains(Vec2::new(x as f64, y as f64));
+    let fits = !strict || (inside(k.x, k.y) && inside(k.right(), k.y) && inside(k.x, k.bottom()) && inside(k.right(), k.bottom()));
+    in_bounds && fits && !placed.iter().any(|p| p.overlaps(&r))
+}
+
+/// An item's spot: its cell's centre if free, else the nearest of a few
+/// positions around it. Without `strict` it may overhang the cell.
 fn spot(shape: &Polygon, (cx, cy): (f32, f32), w: f32, h: f32, bounds: Rect, placed: &[Rect], strict: bool) -> Option<Rect> {
     const STEPS: [(f32, f32); 25] = [
         (0.0, 0.0),
@@ -674,110 +717,90 @@ fn spot(shape: &Polygon, (cx, cy): (f32, f32), w: f32, h: f32, bounds: Rect, pla
         (2.0, 2.0),
     ];
     let (sx, sy) = (w * 0.3 + 8.0, h * 0.6 + 6.0);
-    let inside = |x: f32, y: f32| shape.contains(Vec2::new(x as f64, y as f64));
-    STEPS.iter().find_map(|&(dx, dy)| {
-        let r = Rect::new(cx - w / 2.0 + dx * sx, cy - h / 2.0 + dy * sy, w, h);
-        let ok_bounds = r.x >= bounds.x + 4.0 && r.right() <= bounds.right() - 4.0 && r.y >= bounds.y + 2.0 && r.bottom() <= bounds.bottom() - 2.0;
-        // Glyph boxes carry some air: let them graze the edge a little.
-        let k = r.inset_xy(2.0, 3.0);
-        let fits = !strict || inside(k.x, k.y) && inside(k.right(), k.y) && inside(k.x, k.bottom()) && inside(k.right(), k.bottom());
-        (ok_bounds && fits && !placed.iter().any(|p| p.overlaps(&r))).then_some(r)
-    })
+    STEPS.iter().map(|&(dx, dy)| Rect::new(cx - w / 2.0 + dx * sx, cy - h / 2.0 + dy * sy, w, h)).find(|&r| free(shape, r, bounds, placed, strict))
 }
 
-/// Labels styled by level (see [`Level`]): what does not fit is left to the
-/// tooltip.
+/// A title's spot: as high inside its region as it fits, like a region
+/// name on a map, so it reads as "this area is that folder".
+fn title_spot(shape: &Polygon, cx: f32, w: f32, h: f32, bounds: Rect, placed: &[Rect]) -> Option<Rect> {
+    let (min, max) = shape.bbox();
+    let (top, bottom) = (min.y as f32, max.y as f32);
+    let mut y = top + 5.0;
+    while y + h < bottom - 4.0 {
+        for dx in [0.0, -0.3, 0.3, -0.6, 0.6] {
+            let r = Rect::new(cx - w / 2.0 + dx * w, y, w, h);
+            if free(shape, r, bounds, placed, true) {
+                return Some(r);
+            }
+        }
+        y += h * 0.6;
+    }
+    None
+}
+
+/// Labels that show the tree (ADR-0013).
 ///
-/// A folder whose largest child covers most of it is, to the eye, that
-/// child: the folder shows only as a thin rim. Such chains get one label at
-/// the region they share. It names the cell actually seen, with the folders
-/// around it as a small path above (`aurora-engine ›` over `target`), so neither
-/// name is lost and none is misplaced. Folders showing several children
-/// float their name on a soft halo.
-fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<LabelCand>, bounds: Rect) {
+/// - Placement says what a label is: a folder showing its contents is a
+///   *title*, set high inside its region on one line with its glyph and size
+///   (`▣ footage  175 GB · 52%`); everything else is an *item*, centred in
+///   its cell. Titles read as "this area", items as "a thing in it".
+/// - Style says how deep: each level has its own size, weight, ink and
+///   glyph ([`Level`]), so level 1, 2 and 3 can be told apart at a glance.
+/// - Hovering a cell lights the titles of every folder around it and dims
+///   the rest, tracing its place in the tree.
+fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<LabelCand>, bounds: Rect, hovered: Option<usize>) {
     ui.layer = 1;
     cands.sort_by(|a, b| {
         let (ca, cb) = (&layout.cells[a.idx], &layout.cells[b.idx]);
-        // Direct children of the scope first, always: they are what a
-        // click opens. Then the followed entry's path, then outer first.
-        (cb.depth == 1).cmp(&(ca.depth == 1)).then(b.first.cmp(&a.first)).then(ca.depth.cmp(&cb.depth)).then(b.area.total_cmp(&a.area))
+        // The scope's children first (they are what a click opens), then
+        // the followed entry's path, then outer before inner, titles before
+        // items, big before small.
+        (cb.depth == 1).cmp(&(ca.depth == 1)).then(b.first.cmp(&a.first)).then(ca.depth.cmp(&cb.depth)).then(cb.has_children.cmp(&ca.has_children)).then(b.area.total_cmp(&a.area))
     });
     let n = layout.cells.len();
-    // Dominant child: fills its parent, which then shows only as a rim.
-    let mut dominant: Vec<Option<usize>> = vec![None; n];
-    for (i, c) in layout.cells.iter().enumerate() {
-        if let Some(p) = c.parent
-            && !matches!(c.kind, CellKind::Others { .. })
-            && c.polygon.area() >= 0.7 * layout.cells[p as usize].polygon.area()
-        {
-            dominant[p as usize] = Some(i);
-        }
+    // The hovered cell and every folder containing it.
+    let mut lit = vec![false; n];
+    let mut h = hovered;
+    while let Some(i) = h {
+        lit[i] = true;
+        h = layout.cells[i].parent.map(|p| p as usize);
     }
-    let mut absorbed = vec![false; n];
-    for d in dominant.iter().flatten() {
-        absorbed[*d] = true;
-    }
-    let mut cand_of: Vec<Option<usize>> = vec![None; n];
-    for (k, c) in cands.iter().enumerate() {
-        cand_of[c.idx] = Some(k);
-    }
-
     let mut placed: Vec<Rect> = Vec::new();
     // Level-1 folders that got a label; nothing inside an unnamed one is
     // named either, so no name ever shows without its context.
     let mut named = vec![false; n];
-    for head in &cands {
-        let root = scope_of(layout, head.idx);
-        if root != head.idx && !named[root] {
+    for cand in &cands {
+        let c: &MapCell = &layout.cells[cand.idx];
+        let root = scope_of(layout, cand.idx);
+        if root != cand.idx && !named[root] {
             continue;
         }
-        // Chain members are labelled through their head.
-        if absorbed[head.idx] {
-            continue;
-        }
-        let mut chain = vec![head.idx];
-        while let Some(d) = dominant[*chain.last().unwrap()] {
-            chain.push(d);
-        }
-        // Without room for the path line, an inner name would be out of
-        // context: name the outer folder instead.
-        if chain.len() > 1 && head.inradius < 30.0 {
-            chain.truncate(1);
-        }
-        // A direct child of the scope keeps its own name as the label; what
-        // fills it becomes a quiet line underneath instead.
-        let inner = if layout.cells[head.idx].depth == 1 && chain.len() > 1 { Some(chain.split_off(1)) } else { None };
-        let end = *chain.last().unwrap();
-        let cand = cand_of[end].map_or(head, |k| &cands[k]);
-        let opacity = head.alpha.min(cand.alpha);
-        let c: &MapCell = &layout.cells[end];
-        let top = &layout.cells[head.idx];
-        let full_name = ctx.inv.name(c.node);
-        // The level sets the style; room only decides what fits. A region
-        // is labelled at the level of the folder it belongs to (the head).
-        let lv = level(top.depth);
+        let lv = level(c.depth);
         let room = cand.inradius as f32;
-        let (cx, cy) = (cand.center.x as f32, cand.center.y as f32);
-        let frame = c.has_children || chain.len() > 1;
-        let max_w = cand.inradius as f32 * if frame { 2.4 } else { 1.8 };
-        // Files carry their type as an icon; folders are plain names.
-        let file = (c.kind == CellKind::File).then(|| ctx.inv.node(c.node));
-        let icon = file.map(widgets::kind_icon);
+        let opacity = cand.alpha * if hovered.is_some() && !lit[cand.idx] { 0.72 } else { 1.0 };
+        let title = c.has_children;
+        let node = ctx.inv.node(c.node);
+        let full_name = ctx.inv.name(c.node);
+        let file = c.kind == CellKind::File;
+        let icon = if file { Some(widgets::kind_icon(node)) } else { lv.folder };
         let isz = lv.icon;
-        let text_w = if icon.is_some() { max_w - isz - 4.0 } else { max_w };
+        let wi = if icon.is_some() { isz + 5.0 } else { 0.0 };
+        let (cx, cy) = (cand.center.x as f32, cand.center.y as f32);
+        let (smin, smax) = cand.shape.bbox();
+        let max_w = if title { ((smax.x - smin.x) as f32 - 20.0).min(room * 3.2) } else { room * 1.8 } - wi;
         let name = match file {
             _ if room < lv.min_room => None,
-            Some(n) => file_name(ui, full_name, n.category() != tessera_domain::Category::Other, &lv.name, text_w),
-            None => {
-                let name = ui.text.elide(full_name, &lv.name, text_w);
-                // A label cut down to a stub says nothing; leave it bare.
+            true => file_name(ui, full_name, node.category() != tessera_domain::Category::Other, &lv.name, max_w),
+            false => {
+                let name = ui.text.elide(full_name, &lv.name, max_w);
+                // A name cut down to a stub says nothing; leave it bare.
                 let (kept, total) = (name.chars().count().saturating_sub(1), full_name.chars().count());
                 (!name.ends_with('…') || kept >= total.min(6)).then_some(name)
             }
         };
-        if name.is_none() {
+        let Some(name) = name else {
             // Too small for a name: a file still shows what it is.
-            if let Some(icon) = icon
+            if let Some(icon) = icon.filter(|_| file)
                 && room >= isz * 0.5 + 3.0
                 && let Some(r) = spot(&cand.shape, (cx, cy), isz, isz, bounds, &placed, true)
             {
@@ -785,72 +808,56 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
                 placed.push(r.inset(-2.0));
             }
             continue;
-        }
-        let name = name.unwrap_or_default();
-        let mut with_size = lv.size_room.is_some_and(|m| room >= m);
-        let with_share = lv.share_room.is_some_and(|m| room >= m) && chain.len() == 1;
-        // The folders this cell fills, outermost first.
-        let path = (chain.len() > 1).then(|| {
-            let names: Vec<&str> = chain[..chain.len() - 1].iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
-            ui.text.elide(&format!("{} ›", names.join(" › ")), &theme::MAP_PATH, max_w)
-        });
-        let mut inner = inner.filter(|_| room >= 40.0).map(|v| {
-            let names: Vec<&str> = v.iter().map(|&i| ctx.inv.name(layout.cells[i].node)).collect();
-            ui.text.elide(&names.join(" › "), &theme::MAP_PATH, max_w)
-        });
-        let wi = if icon.is_some() { isz + 4.0 } else { 0.0 };
-        let wn = wi + ui.measure(&name, lv.name);
-        let wp = path.as_ref().map_or(0.0, |p| ui.measure(p, theme::MAP_PATH));
-        let size = if with_share { format!("{} · {}", ByteSize(c.size), widgets::percent(c.share)) } else { ByteSize(c.size).to_string() };
-        let ws = if with_size { ui.measure(&size, lv.num) } else { 0.0 };
+        };
+        let wn = ui.measure(&name, lv.name);
+        let size = if lv.share_room.is_some_and(|m| room >= m) { format!("{} · {}", ByteSize(c.size), widgets::percent(c.share)) } else { ByteSize(c.size).to_string() };
+        let ws = ui.measure(&size, lv.num);
         let lh = lv.name.line_height();
-        let ph = if path.is_some() { theme::MAP_PATH.line_height() } else { 0.0 };
-        let wq = inner.as_ref().map_or(0.0, |q| ui.measure(q, theme::MAP_PATH));
-        let qh = if inner.is_some() { theme::MAP_PATH.line_height() + 2.0 } else { 0.0 };
-        let h = ph + qh + if with_size { lh + lv.num.line_height() } else { lh };
-        let w = wn.max(ws).max(wp).max(wq);
-        // Find a free spot inside the cell, nearest its centre; failing
-        // that, try again with just the name.
-        let mut r = spot(&cand.shape, (cx, cy), w, h, bounds, &placed, true);
-        if r.is_none() && (with_size || inner.is_some()) {
-            r = spot(&cand.shape, (cx, cy), wn.max(wp), ph + lh, bounds, &placed, true);
-            with_size = false;
-            inner = None;
+        let mut with_size = lv.size_room.is_some_and(|m| room >= m);
+
+        // Find a place: titles high in their region, items at their centre;
+        // drop the size before giving up, and never lose a level-1 name.
+        let line_w = |with_size: bool| wi + wn + if with_size { 8.0 + ws } else { 0.0 };
+        let item_h = |with_size: bool| lh + if with_size { lv.num.line_height() } else { 0.0 };
+        let mut r = None;
+        for sized in [with_size, false] {
+            if r.is_some() || (sized && !with_size) {
+                continue;
+            }
+            r = if title {
+                title_spot(&cand.shape, cx, line_w(sized), lh, bounds, &placed).or_else(|| spot(&cand.shape, (cx, cy), line_w(sized), lh, bounds, &placed, true))
+            } else {
+                spot(&cand.shape, (cx, cy), (wi + wn).max(if sized { ws } else { 0.0 }), item_h(sized), bounds, &placed, true)
+            };
+            if r.is_some() {
+                with_size = sized;
+            }
         }
-        // A scope's direct child is always named, even if it must overhang
-        // a narrow cell.
-        if r.is_none() && top.depth == 1 {
-            r = spot(&cand.shape, (cx, cy), wn.max(wp), ph + lh, bounds, &placed, false);
+        if r.is_none() && c.depth == 1 {
+            with_size = false;
+            r = spot(&cand.shape, (cx, cy), wi + wn, lh, bounds, &placed, false);
         }
         let Some(r) = r else { continue };
-        if frame && lv.halo > 0.0 {
+
+        if title && lv.halo > 0.0 {
             // Over busy content: a soft dark halo, no hard pill.
-            ui.shadow(r.inset_xy(-10.0, -5.0), alpha(theme::BG, lv.halo * opacity), 16.0, 12.0);
+            ui.shadow(r.inset_xy(-10.0, -4.0), alpha(theme::BG, lv.halo * opacity), 14.0, 12.0);
         }
-        let mut y = r.y;
-        if let Some(p) = &path {
-            // A top-level folder keeps its family colour in the path.
-            let ink = if top.depth == 1 { theme::branch(head.hue) } else { alpha(theme::TEXT, 0.62) };
-            ui.text(r.cx() - wp / 2.0, y, p, theme::MAP_PATH, alpha(ink, ink[3] * opacity));
-            y += ph;
-        }
-        let nx = r.cx() - wn / 2.0;
+        let family = theme::branch(cand.hue);
+        let x = if title { r.x } else { r.cx() - (wi + wn) / 2.0 };
         if let Some(icon) = icon {
-            ui.icon(nx, y + (lh - isz) / 2.0, isz, icon, alpha(theme::TEXT, lv.ink * 0.8 * opacity));
+            let ink = if c.depth == 1 && !file { family } else { alpha(theme::TEXT, lv.ink * 0.8) };
+            ui.icon(x, r.y + (lh - isz) / 2.0, isz, icon, alpha(ink, ink[3] * opacity));
         }
-        ui.text(nx + wi, y, &name, lv.name, alpha(theme::TEXT, lv.ink * opacity));
+        ui.text(x + wi, r.y, &name, lv.name, alpha(theme::TEXT, lv.ink * opacity));
         if with_size {
             // Level 1 carries its family colour; deeper sizes are quiet.
-            let size_ink = if top.depth == 1 { theme::branch(head.hue) } else { alpha(theme::TEXT, 0.52) };
-            ui.text(r.cx() - ws / 2.0, y + lh, &size, lv.num, alpha(size_ink, size_ink[3] * opacity));
+            let ink = if c.depth == 1 { family } else { alpha(theme::TEXT, 0.5) };
+            let (sx, sy) = if title { (x + wi + wn + 8.0, r.y + (lh - lv.num.line_height()) * 0.5 + 0.5) } else { (r.cx() - ws / 2.0, r.y + lh) };
+            ui.text(sx, sy, &size, lv.num, alpha(ink, ink[3] * opacity));
         }
-        if let Some(q) = &inner {
-            let qy = y + lh + if with_size { lv.num.line_height() } else { 0.0 } + 2.0;
-            ui.text(r.cx() - wq / 2.0, qy, q, theme::MAP_PATH, alpha(theme::TEXT, 0.5 * opacity));
-        }
-        named[head.idx] = true;
-        // Folder names keep a little air around them.
-        placed.push(if frame { r.inset_xy(-8.0, -5.0) } else { r.inset(-3.0) });
+        named[cand.idx] = true;
+        placed.push(if title { r.inset_xy(-8.0, -4.0) } else { r.inset(-3.0) });
     }
     ui.layer = 0;
 }
@@ -859,7 +866,7 @@ fn place_labels(ui: &mut Ui, ctx: &Ctx, layout: &MapLayout, mut cands: Vec<Label
 /// without its extension when the icon already shows the type; else, for
 /// long names, shortened in the middle so the end (dates, take numbers)
 /// survives. `None` leaves just the icon.
-fn file_name(ui: &mut Ui, name: &str, typed: bool, style: &crate::gfx::text::TextStyle, max_w: f32) -> Option<String> {
+fn file_name(ui: &mut Ui, name: &str, typed: bool, style: &TextStyle, max_w: f32) -> Option<String> {
     if ui.measure(name, *style) <= max_w {
         return Some(name.to_owned());
     }
