@@ -158,13 +158,11 @@ pub const NUM_BIG: TextStyle = TextStyle::new(20.0, 600, Font::Num);
 pub const MONO: TextStyle = TextStyle::new(11.0, 400, Font::Mono);
 
 // Map labels: one style per nesting level, so the level reads in the type.
-pub const MAP_L1: TextStyle = TextStyle::new(15.0, 650, Font::Sans);
+pub const MAP_L1: TextStyle = TextStyle::new(14.5, 650, Font::Sans);
 pub const MAP_L1_NUM: TextStyle = TextStyle::new(11.5, 560, Font::Num);
 pub const MAP_L2: TextStyle = TextStyle::new(12.0, 590, Font::Sans);
 pub const MAP_L2_NUM: TextStyle = TextStyle::new(10.5, 500, Font::Num);
 pub const MAP_L3: TextStyle = TextStyle::new(10.5, 500, Font::Sans);
-/// Folders a labelled cell fills, set above its name.
-pub const MAP_PATH: TextStyle = TextStyle::new(10.5, 560, Font::Sans);
 
 // Metrics.
 /// Default icon size (points); icons sit on a 24-unit grid.

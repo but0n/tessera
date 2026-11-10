@@ -31,5 +31,6 @@ meanings. Code identifiers are given in `backticks`.
 | **Branch** | The top-level child of the focus a cell descends from; its family colours the whole subtree. | `MapCell::branch` |
 | **Small items** | Siblings too small to draw individually, folded into one dotted cell. | `CellKind::Others` |
 | **Step** | One level of map navigation, in or out, by click, scroll, pinch or Esc. A scroll *leans* toward the step before it fires. | `state::Gesture` |
+| **Title / item** (map label) | A folder showing its contents is labelled as a *title* at the top of its region; anything else as an *item* at its cell's centre. The level is told by the style. | `views::map::place_labels` |
 | **Arrival** | The entry a step was about (what was clicked, or the folder just left). It stays labelled and pulses once in the new view. | `ViewState::arrival` |
 | **Sample data** | A fictional folder served through the real ports, for demos and screenshots. | `tessera_infra::SampleReader` |
