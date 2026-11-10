@@ -10,6 +10,7 @@ use tessera_domain::NodeId;
 
 use crate::app::{App, build_frame};
 use crate::gfx::Renderer;
+use crate::gfx::text::Fonts;
 use crate::state::Tab;
 use crate::theme;
 use crate::ui::Input;
@@ -48,7 +49,7 @@ pub fn run(ws: Workspace, carto: Cartographer, opts: Options) {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("adapter");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
     let format = wgpu::TextureFormat::Rgba8Unorm;
-    let mut renderer = Renderer::new(device, queue, format);
+    let mut renderer = Renderer::new(device, queue, format, Fonts::load(&theme::TEXT_STYLES));
 
     app.view.tab = opts.tab;
     {

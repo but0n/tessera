@@ -9,8 +9,8 @@
 //!    siblings in parallel, warm-started from the previous layout.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
@@ -53,9 +53,11 @@ pub struct MapCell {
 
 #[derive(Clone, Debug)]
 pub struct MapLayout {
-    /// Identity of the inventory this layout was computed from; layouts
-    /// from a previous scan must never be indexed into a new inventory.
-    pub source: usize,
+    /// The inventory this layout was computed from; layouts from a previous
+    /// scan must never be indexed into a new inventory. Weak, so it neither
+    /// keeps a finished scan's tree alive nor lets its address be reused
+    /// (and mistaken for this one) while the layout is still around.
+    pub source: Weak<RwLock<Inventory>>,
     pub focus: NodeId,
     pub generation: u64,
     pub width: f64,
@@ -66,6 +68,11 @@ pub struct MapLayout {
 }
 
 impl MapLayout {
+    /// True if this layout was computed from `inventory`.
+    pub fn is_from(&self, inventory: &Arc<RwLock<Inventory>>) -> bool {
+        std::ptr::eq(self.source.as_ptr(), Arc::as_ptr(inventory))
+    }
+
     /// Deepest cell containing `p`.
     pub fn hit(&self, p: Vec2) -> Option<usize> {
         // Pre-order + non-overlapping siblings ⇒ the first hit scanning
@@ -274,50 +281,55 @@ pub struct MapRequest {
 pub struct Cartographer {
     tx: Sender<MapRequest>,
     latest: Arc<Mutex<Option<Arc<MapLayout>>>>,
-    busy: Arc<AtomicBool>,
+    /// Requests sent but not yet answered (solved or superseded).
+    pending: Arc<AtomicUsize>,
 }
 
 impl Cartographer {
     pub fn new(params: MapParams, waker: Waker) -> Cartographer {
         let (tx, rx) = crossbeam_channel::unbounded::<MapRequest>();
         let latest: Arc<Mutex<Option<Arc<MapLayout>>>> = Arc::default();
-        let busy = Arc::new(AtomicBool::new(false));
-        let (out, flag) = (latest.clone(), busy.clone());
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (out, owed) = (latest.clone(), pending.clone());
         std::thread::Builder::new()
             .name("tessera-cartographer".into())
             .spawn(move || {
                 let mut warm = WarmStart::default();
-                let mut inv_ptr: *const RwLock<Inventory> = std::ptr::null();
+                let mut source: Weak<RwLock<Inventory>> = Weak::new();
                 while let Ok(mut req) = rx.recv() {
+                    let mut taken = 1;
                     while let Ok(r) = rx.try_recv() {
                         req = r;
+                        taken += 1;
                     }
-                    flag.store(true, Ordering::Relaxed);
-                    if Arc::as_ptr(&req.inventory) != inv_ptr {
+                    if !std::ptr::eq(source.as_ptr(), Arc::as_ptr(&req.inventory)) {
                         warm = WarmStart::default();
-                        inv_ptr = Arc::as_ptr(&req.inventory);
+                        source = Arc::downgrade(&req.inventory);
                     }
                     let layout = compute(&req, &params, &mut warm);
                     *out.lock() = Some(Arc::new(layout));
-                    flag.store(false, Ordering::Relaxed);
+                    owed.fetch_sub(taken, Ordering::Release);
                     waker();
                 }
             })
             .expect("cartographer thread");
-        Cartographer { tx, latest, busy }
+        Cartographer { tx, latest, pending }
     }
 
     pub fn request(&self, req: MapRequest) {
-        self.busy.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(req);
+        self.pending.fetch_add(1, Ordering::Release);
+        if self.tx.send(req).is_err() {
+            self.pending.fetch_sub(1, Ordering::Release);
+        }
     }
 
     pub fn latest(&self) -> Option<Arc<MapLayout>> {
         self.latest.lock().clone()
     }
 
+    /// True until every request made so far has been answered.
     pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::Relaxed)
+        self.pending.load(Ordering::Acquire) > 0
     }
 }
 
@@ -334,7 +346,7 @@ fn compute(req: &MapRequest, params: &MapParams, warm: &mut WarmStart) -> MapLay
     let next = solver.next_warm.into_inner();
     // Keep warm entries of levels that were not re-solved this time.
     warm.0.extend(next.0);
-    MapLayout { source: Arc::as_ptr(&req.inventory) as usize, focus: req.focus, generation, width: req.width, height: req.height, cells, elapsed: t.elapsed() }
+    MapLayout { source: Arc::downgrade(&req.inventory), focus: req.focus, generation, width: req.width, height: req.height, cells, elapsed: t.elapsed() }
 }
 
 /// Solves a layout synchronously (tests, headless snapshots).

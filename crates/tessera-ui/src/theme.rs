@@ -164,6 +164,11 @@ pub const MAP_L2: TextStyle = TextStyle::new(12.0, 590, Font::Sans);
 pub const MAP_L2_NUM: TextStyle = TextStyle::new(10.5, 500, Font::Num);
 pub const MAP_L3: TextStyle = TextStyle::new(10.5, 500, Font::Sans);
 
+/// Every style above. Their fonts are warmed up at startup so that no
+/// style's first use stalls a frame; list new styles here.
+pub const TEXT_STYLES: [TextStyle; 16] =
+    [DISPLAY, TITLE, BODY, BODY_STRONG, SMALL, SMALL_STRONG, CAPTION, NUM, NUM_STRONG, NUM_BIG, MONO, MAP_L1, MAP_L1_NUM, MAP_L2, MAP_L2_NUM, MAP_L3];
+
 // Metrics.
 /// Default icon size (points); icons sit on a 24-unit grid.
 pub const ICON: f32 = 15.0;
