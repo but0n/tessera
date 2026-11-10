@@ -165,7 +165,7 @@ fn composition(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect) {
         let container = Polygon::circle(Vec2::new(0.0, 0.0), d as f64 / 2.0, 72);
         let values: Vec<f64> = cats.iter().map(|s| s.bytes as f64).collect();
         let warm = (view.composition.sites.len() == values.len()).then_some(view.composition.sites.as_slice());
-        let sol = tessera_voronoi::solve(&container, &values, warm, 11, &Settings { max_iterations: 150, convergence: 0.005 });
+        let sol = tessera_voronoi::solve(&container, &values, warm, 11, &Settings { max_iterations: 150, convergence: 0.005, ..Settings::default() });
         view.composition.cells = sol.cells;
         view.composition.sites = sol.sites;
         view.composition.key = key;
