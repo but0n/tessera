@@ -114,7 +114,12 @@ fn keyboard(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, out: &mut Vec<Action>)
     if cmd {
         return;
     }
-    if ((i.key(NamedKey::Escape) || i.key(NamedKey::Backspace)) && view.tab == Tab::Map) || i.back_pressed {
+    let back = i.key(NamedKey::Escape) || i.key(NamedKey::Backspace) || i.back_pressed;
+    if view.tab == Tab::Overview && view.list.is_some() {
+        if back {
+            out.push(Action::ShowList(None));
+        }
+    } else if ((i.key(NamedKey::Escape) || i.key(NamedKey::Backspace)) && view.tab == Tab::Map) || i.back_pressed {
         out.push(Action::FocusUp);
     }
     let Some(sel) = view.selected else {

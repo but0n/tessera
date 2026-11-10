@@ -89,6 +89,7 @@ pub fn footer(ui: &mut Ui, ctx: &Ctx, view: &ViewState, r: Rect) {
     ui.rect(r, theme::PANEL, 0.0);
     ui.rect(Rect::new(r.x, r.y, r.w, 1.0), theme::LINE_SOFT, 0.0);
     let hints: &[(&str, &str)] = match (view.tab, view.selected.is_some()) {
+        (Tab::Overview, _) if view.list.is_some() => &[("Esc", "back to overview"), ("Space", "mark"), ("Enter", "open in map")],
         (Tab::Map, _) => &[("Click", "open"), ("Scroll", "in / out"), ("Esc", "up"), ("⌥ Click", "select"), ("Right-click", "mark")],
         (Tab::Overview, true) => &[("Space", "mark"), ("Enter", "open in map"), ("↑↓←→", "navigate")],
         (Tab::Overview, false) => &[("↓", "navigate"), ("⌘2", "map")],

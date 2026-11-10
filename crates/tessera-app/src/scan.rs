@@ -102,7 +102,7 @@ pub struct ScanSession {
     reader_name: &'static str,
 }
 
-const INSIGHT_K: usize = 24;
+const INSIGHT_K: usize = 200;
 
 impl ScanSession {
     pub fn start(root: PathBuf, reader: Arc<dyn DirectoryReader>, policy: ScanPolicy, waker: Waker) -> ScanSession {

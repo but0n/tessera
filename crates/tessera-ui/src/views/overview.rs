@@ -7,11 +7,15 @@ use tessera_voronoi::{Polygon, Settings, Vec2};
 use super::Ctx;
 use super::widgets::{self, ButtonKind};
 use crate::gfx::cell_flags;
-use crate::state::{Action, Tab, ViewState};
+use crate::gfx::icons::Icon;
+use crate::state::{Action, List, Tab, ViewState};
 use crate::theme::{self, alpha, mix};
 use crate::ui::{Align, Rect, Ui};
 
 pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut Vec<Action>) {
+    if let Some(list) = view.list {
+        return full_list(ui, ctx, view, list, area, out);
+    }
     if ui.hovered(area) {
         view.overview_scroll -= ui.input.wheel.1;
     }
@@ -235,7 +239,9 @@ fn regenerable(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect, out: &mut 
     let head = c.take_top(16.0);
     widgets::caption(ui, head.x, head.y, "Regenerable", theme::TEXT_3);
     let summary = format!("{} in {} places", ByteSize(ctx.insights.reclaimable_bytes), ctx.insights.reclaimable.len());
-    ui.label(head, &summary, theme::SMALL, theme::TEXT_3, Align::End);
+    if show_all(ui, head, &summary) {
+        out.push(Action::ShowList(Some(List::Regenerable)));
+    }
     c.take_top(10.0);
     if ctx.insights.reclaimable.is_empty() {
         let msg = if ctx.scanning { "Looking for caches and build outputs…" } else { "No caches or build outputs found" };
@@ -254,10 +260,68 @@ fn largest(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect, out: &mut Vec<
     let mut c = r.inset_xy(22.0, 20.0);
     let head = c.take_top(16.0);
     widgets::caption(ui, head.x, head.y, "Largest files", theme::TEXT_3);
+    if ctx.insights.largest_files.len() > 12 && show_all(ui, head, &format!("Top {}", ctx.insights.largest_files.len())) {
+        out.push(Action::ShowList(Some(List::Largest)));
+    }
     c.take_top(8.0);
     for &id in ctx.insights.largest_files.iter().filter(|&&id| !ctx.inv.node(id).is_removed()).take(12) {
         let row = c.take_top(34.0);
         item_row(ui, ctx, view, id, row, false, out);
+    }
+}
+
+/// "summary ›" at the right of a card header: opens the full list.
+fn show_all(ui: &mut Ui, head: Rect, summary: &str) -> bool {
+    let w = ui.measure(summary, theme::SMALL) + 18.0;
+    let r = Rect::new(head.right() - w - 4.0, head.cy() - 11.0, w + 10.0, 22.0);
+    let (hover, click) = ui.interact(r);
+    if hover {
+        ui.rect(r, theme::HOVER, theme::RADIUS_SM);
+    }
+    let ink = if hover { theme::TEXT } else { theme::TEXT_2 };
+    ui.label(Rect::new(r.x + 6.0, r.y, w - 14.0, r.h), summary, theme::SMALL, ink, Align::Start);
+    ui.icon(r.right() - 17.0, r.cy() - 6.0, 12.0, Icon::ChevronRight, ink);
+    click
+}
+
+/// A card's list in full, in place of the overview.
+fn full_list(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, list: List, area: Rect, out: &mut Vec<Action>) {
+    let w = (area.w - 56.0).min(1120.0);
+    let x0 = area.x + (area.w - w) / 2.0;
+    let (title, ids, row_h, two_line): (&str, Vec<NodeId>, f32, bool) = match list {
+        List::Regenerable => ("Regenerable", ctx.insights.reclaimable.clone(), 46.0, true),
+        List::Largest => ("Largest files", ctx.insights.largest_files.clone(), 36.0, false),
+    };
+    let ids: Vec<NodeId> = ids.into_iter().filter(|&id| !ctx.inv.node(id).is_removed()).collect();
+    let total: u64 = ids.iter().map(|&id| ctx.inv.node(id).size()).sum();
+
+    // Header: back, title, what the list adds up to.
+    let head = Rect::new(x0, area.y + 18.0, w, 36.0);
+    if widgets::icon_button(ui, Rect::new(head.x - 4.0, head.cy() - 15.0, 30.0, 30.0), Icon::ArrowLeft, "Back to overview  Esc", true) {
+        out.push(Action::ShowList(None));
+    }
+    ui.label(Rect::new(head.x + 34.0, head.y, w - 34.0, head.h), title, theme::TITLE, theme::TEXT, Align::Start);
+    let summary = format!("{} items · {}", ids.len(), ByteSize(total));
+    ui.label(head, &summary, theme::BODY, theme::TEXT_3, Align::End);
+    let body = Rect::new(area.x, head.bottom() + 10.0, area.w, area.bottom() - head.bottom() - 10.0);
+    ui.rect(Rect::new(x0, body.y, w, 1.0), theme::LINE_SOFT, 0.0);
+
+    // Rows, virtualised.
+    if ui.hovered(body) {
+        view.list_scroll -= ui.input.wheel.1;
+    }
+    let content_h = ids.len() as f32 * row_h + 24.0;
+    view.list_scroll = view.list_scroll.clamp(0.0, (content_h - body.h).max(0.0));
+    let prev = ui.set_clip(body);
+    let first = (view.list_scroll / row_h) as usize;
+    let visible = (body.h / row_h) as usize + 2;
+    for (i, &id) in ids.iter().enumerate().skip(first).take(visible) {
+        let row = Rect::new(x0 + 10.0, body.y + 12.0 + i as f32 * row_h - view.list_scroll, w - 20.0, row_h);
+        item_row(ui, ctx, view, id, row, two_line, out);
+    }
+    ui.set_clip(prev);
+    if let Some(o) = widgets::scrollbar(ui, body, content_h, view.list_scroll, &mut view.list_drag) {
+        view.list_scroll = o;
     }
 }
 

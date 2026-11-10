@@ -194,6 +194,11 @@ impl App {
                 }
             }
             Action::SetTab(t) => view.tab = t,
+            Action::ShowList(l) => {
+                view.list = l;
+                view.list_scroll = 0.0;
+                view.list_drag = None;
+            }
             Action::AskCommit => view.confirm = !self.ws.plan.is_empty(),
             Action::CancelCommit => view.confirm = false,
             Action::Commit => {

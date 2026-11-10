@@ -11,6 +11,13 @@ use tessera_voronoi::{Polygon, Site};
 
 use crate::theme;
 
+/// A full list opened from an overview card.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum List {
+    Regenerable,
+    Largest,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Tab {
     Overview,
@@ -30,6 +37,8 @@ pub enum Action {
     Unmark(NodeId),
     ToggleExpand(NodeId),
     SetTab(Tab),
+    /// Open (or, with `None`, close) a full list on the overview.
+    ShowList(Option<List>),
     AskCommit,
     CancelCommit,
     Commit,
@@ -121,6 +130,10 @@ pub struct ViewState {
     /// Scrollbar drag: tree offset when the drag began.
     pub tree_drag: Option<f32>,
     pub overview_drag: Option<f32>,
+    /// Full list shown in place of the overview, with its own scroll.
+    pub list: Option<List>,
+    pub list_scroll: f32,
+    pub list_drag: Option<f32>,
     /// Layout currently on screen and when it first appeared.
     pub shown: Option<(usize, NodeId, Instant)>,
     pub last_request: Option<(NodeId, u64, (u32, u32), Instant)>,
@@ -150,6 +163,9 @@ impl Default for ViewState {
             tree_glide: None,
             tree_drag: None,
             overview_drag: None,
+            list: None,
+            list_scroll: 0.0,
+            list_drag: None,
             shown: None,
             last_request: None,
             sorted: HashMap::new(),

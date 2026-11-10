@@ -28,6 +28,7 @@ pub struct Insights {
 }
 
 impl Insights {
+    /// `k` bounds the largest-files list; every reclaimable place is kept.
     pub fn compute(inv: &Inventory, k: usize) -> Insights {
         let mut heap: BinaryHeap<Reverse<(u64, NodeId)>> = BinaryHeap::with_capacity(k + 1);
         let mut hinted: Vec<NodeId> = Vec::new();
@@ -54,8 +55,9 @@ impl Insights {
         // Keep only outermost hinted dirs so bytes are never double counted.
         let mut reclaimable: Vec<NodeId> = hinted.iter().copied().filter(|&id| !inv.ancestors(id).skip(1).any(|a| inv.node(a).hint().is_some())).collect();
         let reclaimable_bytes = reclaimable.iter().map(|&id| inv.node(id).size()).sum();
+        // All of them: only outermost folders count, so the list stays short,
+        // and its length is the "N places" the total is spread over.
         reclaimable.sort_unstable_by_key(|&id| Reverse(inv.node(id).size()));
-        reclaimable.truncate(k);
 
         let mut categories: Vec<CategoryShare> =
             Category::FILE_KINDS.iter().map(|&c| CategoryShare { category: Some(c), bytes: inv.category_bytes(c), files: inv.category_files(c) }).filter(|s| s.bytes > 0).collect();
