@@ -30,18 +30,19 @@ step.
   review it, and confirmed items go to the Trash, where you can still put
   them back. Tessera never empties the Trash and never marks anything for
   you.
-- **Private.** Everything runs on your Mac, with no network access.
-  Privacy-protected folders such as Mail and Messages are listed but not
-  opened, so there are no permission pop-ups. Grant Full Disk Access if you
-  want them measured too.
+- **Private.** Everything runs on your computer, with no network access.
+  On macOS, privacy-protected folders such as Mail and Messages are listed
+  but not opened, so there are no permission pop-ups. Grant Full Disk
+  Access if you want them measured too.
 - **Light.** It is a native, GPU-drawn app that uses no CPU while idle.
 
 ![The overview](docs/img/overview.png)
 
 ## Getting started
 
-Tessera runs on macOS. Until prebuilt releases are available, build it
-with [Rust](https://rustup.rs):
+Tessera runs on macOS and Linux (Wayland or X11, with Vulkan or OpenGL).
+Until prebuilt releases are available, build it with
+[Rust](https://rustup.rs):
 
 ```sh
 git clone https://github.com/but0n/tessera
@@ -57,7 +58,13 @@ tessera ~/Projects   # any folder
 tessera --sample     # a made-up folder, to look around first
 ```
 
+On Linux it uses the first of Inter, Adwaita Sans or Noto Sans that is
+installed. *Reveal* and *Open folder* go through your desktop's file
+manager and file chooser portal.
+
 ## Controls
+
+On Linux, read ⌘ as Ctrl and ⌥ as Alt.
 
 | | |
 |---|---|
@@ -76,7 +83,9 @@ tessera --sample     # a made-up folder, to look around first
 - Sizes are space actually used on disk. A file with several hard links is
   counted once.
 - A scan stays on one volume. Other disks mounted inside the folder are
-  shown but not entered.
+  shown but not entered. On btrfs, a subvolume counts as part of its disk
+  unless it is mounted separately. Snapshots are measured like `du` does,
+  at full size, even though they share data with their origin.
 
 ## Development
 

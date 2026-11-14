@@ -89,13 +89,8 @@ impl Fonts {
     pub fn load(styles: &[TextStyle]) -> Fonts {
         let mut db = glyphon::fontdb::Database::new();
         db.load_system_fonts();
-        let family_of = |file: &str| {
-            db.faces()
-                .find(|f| matches!(&f.source, glyphon::fontdb::Source::File(p) | glyphon::fontdb::Source::SharedFile(p, _) if p.file_name().is_some_and(|n| n == file)))
-                .map(|f| f.families[0].0.clone())
-        };
-        let sans = family_of("SFNS.ttf").unwrap_or_else(|| "Helvetica Neue".into());
-        let mono = family_of("SFNSMono.ttf").unwrap_or_else(|| "Menlo".into());
+        let sans = pick_family(&db, SANS_FILE, SANS_FAMILIES);
+        let mono = pick_family(&db, MONO_FILE, MONO_FAMILIES);
         db.set_sans_serif_family(sans.clone());
         db.set_monospace_family(mono.clone());
         let locale = std::env::var("LANG").ok().and_then(|l| l.split('.').next().map(|s| s.replace('_', "-"))).unwrap_or_else(|| "en-US".into());
@@ -126,6 +121,40 @@ impl Fonts {
         buffer.shape_until_scroll(&mut self.system, false);
         buffer
     }
+}
+
+// The UI faces, best first. macOS ships its system font as a file with a
+// private family name; elsewhere there is no single system font, so the
+// list prefers faces that carry what the type scale asks for: a full range
+// of weights and tabular figures (ADR-0014).
+#[cfg(target_os = "macos")]
+const SANS_FILE: Option<&str> = Some("SFNS.ttf");
+#[cfg(target_os = "macos")]
+const MONO_FILE: Option<&str> = Some("SFNSMono.ttf");
+#[cfg(target_os = "macos")]
+const SANS_FAMILIES: &[&str] = &["Helvetica Neue"];
+#[cfg(target_os = "macos")]
+const MONO_FAMILIES: &[&str] = &["Menlo"];
+
+#[cfg(not(target_os = "macos"))]
+const SANS_FILE: Option<&str> = None;
+#[cfg(not(target_os = "macos"))]
+const MONO_FILE: Option<&str> = None;
+#[cfg(not(target_os = "macos"))]
+const SANS_FAMILIES: &[&str] = &["Inter", "Inter Variable", "Adwaita Sans", "Noto Sans", "Cantarell", "Roboto", "Ubuntu", "DejaVu Sans", "Liberation Sans"];
+#[cfg(not(target_os = "macos"))]
+const MONO_FAMILIES: &[&str] = &["Adwaita Mono", "JetBrains Mono", "Noto Sans Mono", "DejaVu Sans Mono", "Liberation Mono", "JetBrainsMono Nerd Font"];
+
+/// The family of the font file named `file`, else the first of `families`
+/// that is installed, else the first of `families` (shaping then falls back
+/// glyph by glyph).
+fn pick_family(db: &glyphon::fontdb::Database, file: Option<&str>, families: &[&str]) -> String {
+    use glyphon::fontdb::Source;
+    let by_file = file.and_then(|file| {
+        db.faces().find(|f| matches!(&f.source, Source::File(p) | Source::SharedFile(p, _) if p.file_name().is_some_and(|n| n == file))).map(|f| f.families[0].0.clone())
+    });
+    let installed = |name: &str| db.faces().any(|f| f.families.iter().any(|(n, _)| n == name));
+    by_file.unwrap_or_else(|| families.iter().copied().find(|n| installed(n)).unwrap_or(families[0]).to_owned())
 }
 
 pub struct TextSystem {

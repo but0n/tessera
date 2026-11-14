@@ -7,7 +7,7 @@ use tessera_app::ports::DirectoryReader;
 use tessera_domain::{EntryKind, Listing};
 
 /// `readdir` + `lstat` per entry. Works on any Unix; used as the reference
-/// implementation the fast path is tested against.
+/// implementation the platform readers are tested against.
 pub struct PortableReader;
 
 impl DirectoryReader for PortableReader {

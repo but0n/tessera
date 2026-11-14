@@ -9,7 +9,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tessera_app::ports::{DirectoryReader, Trash, VolumeProbe, VolumeStats};
+use tessera_app::ports::{Desktop, DirectoryReader, Trash, VolumeProbe, VolumeStats};
 use tessera_domain::{EntryKind, Listing};
 
 const KB: u64 = 1 << 10;
@@ -342,6 +342,14 @@ impl Trash for SampleTrash {
     fn trash(&self, _: &Path) -> Result<(), String> {
         Ok(())
     }
+}
+
+/// Sample entries exist nowhere on disk: there is nothing to show.
+pub struct SampleDesktop;
+
+impl Desktop for SampleDesktop {
+    fn reveal(&self, _: &Path) {}
+    fn open_privacy_settings(&self) {}
 }
 
 pub struct SampleVolume;

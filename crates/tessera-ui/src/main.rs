@@ -6,6 +6,7 @@
 
 mod app;
 mod gfx;
+mod platform;
 mod snapshot;
 mod state;
 mod theme;
@@ -20,7 +21,7 @@ use tessera_app::cartography::{Cartographer, MapParams};
 use tessera_app::scan::Waker;
 use tessera_app::{Services, Workspace};
 use tessera_domain::ScanPolicy;
-use tessera_infra::{SampleReader, SampleTrash, SampleVolume, StatVfs, SystemTrash, best_reader, default_policy, home_dir, sample_root};
+use tessera_infra::{SampleDesktop, SampleReader, SampleTrash, SampleVolume, StatVfs, SystemDesktop, SystemTrash, best_reader, default_policy, home_dir, sample_root};
 use winit::event_loop::EventLoop;
 
 use crate::gfx::text::Fonts;
@@ -91,12 +92,12 @@ fn main() {
     // `--sample` serves a fictional folder through the same ports, for
     // demos and screenshots that must not show anyone's real files.
     let (root, services, policy) = if sample {
-        let services = Services { reader: Arc::new(SampleReader), trash: Arc::new(SampleTrash), volume: Arc::new(SampleVolume) };
+        let services = Services { reader: Arc::new(SampleReader), trash: Arc::new(SampleTrash), volume: Arc::new(SampleVolume), desktop: Arc::new(SampleDesktop) };
         (sample_root(), services, ScanPolicy { one_filesystem: true, protected: Arc::default() })
     } else {
         let root = root.or_else(home_dir).unwrap_or_else(|| PathBuf::from("/"));
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        (root, Services { reader: best_reader(), trash: Arc::new(SystemTrash::default()), volume: Arc::new(StatVfs) }, default_policy())
+        (root, Services { reader: best_reader(), trash: Arc::new(SystemTrash::default()), volume: Arc::new(StatVfs), desktop: Arc::new(SystemDesktop) }, default_policy())
     };
 
     if let Some(opts) = snap {

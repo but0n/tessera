@@ -6,6 +6,7 @@ use tessera_domain::ByteSize;
 use super::Ctx;
 use super::widgets::{self, ButtonKind};
 use crate::gfx::icons::Icon;
+use crate::platform;
 use crate::state::{Action, Tab, ViewState};
 use crate::theme::{self, alpha};
 use crate::ui::{Align, Rect, Ui, ease_out};
@@ -14,10 +15,10 @@ pub fn top_bar(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect, out: &mut 
     ui.rect(r, theme::PANEL, 0.0);
     ui.rect(Rect::new(r.x, r.bottom() - 1.0, r.w, 1.0), theme::LINE_SOFT, 0.0);
     let mut row = r;
-    row.take_left(theme::TRAFFIC_LIGHTS_W);
+    row.take_left(theme::TOPBAR_LEAD);
 
     // Brand: three overlapping cells, the app's own visual language.
-    let brand = row.take_left(theme::SIDEBAR_W - theme::TRAFFIC_LIGHTS_W);
+    let brand = row.take_left(theme::SIDEBAR_W - theme::TOPBAR_LEAD);
     let (bx, by) = (brand.x + 2.0, brand.cy());
     ui.rect(Rect::new(bx, by - 8.0, 10.0, 10.0), theme::ACCENT, 3.5);
     ui.rect(Rect::new(bx + 7.0, by - 4.0, 10.0, 10.0), alpha(theme::BRANCH[2], 0.9), 3.5);
@@ -32,10 +33,10 @@ pub fn top_bar(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect, out: &mut 
     right.take_right(4.0);
     let rescan = right.take_right(32.0);
     let rescan = Rect::new(rescan.x, rescan.cy() - 16.0, 32.0, 32.0);
-    if widgets::icon_button(ui, open, Icon::FolderOpen, "Open folder…  ⌘O", true) {
+    if widgets::icon_button(ui, open, Icon::FolderOpen, platform::OPEN_FOLDER_TIP, true) {
         out.push(Action::OpenFolder);
     }
-    if widgets::icon_button(ui, rescan, Icon::Refresh, "Rescan  ⌘R", !ctx.scanning) {
+    if widgets::icon_button(ui, rescan, Icon::Refresh, platform::RESCAN_TIP, !ctx.scanning) {
         out.push(Action::Rescan);
     }
     right.take_right(14.0);
@@ -49,9 +50,9 @@ pub fn top_bar(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, r: Rect, out: &mut 
         out.push(Action::SetTab(if i == 0 { Tab::Overview } else { Tab::Map }));
     }
 
-    // Empty bar space drags the window (the titlebar is transparent).
+    // Empty bar space drags the window where the bar is the titlebar.
     let hot = [open, rescan, seg];
-    if ui.input.pressed && ui.hovered(r) && !hot.iter().any(|h| h.contains(ui.input.mouse)) {
+    if platform::INTEGRATED_TITLEBAR && ui.input.pressed && ui.hovered(r) && !hot.iter().any(|h| h.contains(ui.input.mouse)) {
         out.push(Action::DragWindow);
     }
 
@@ -90,9 +91,9 @@ pub fn footer(ui: &mut Ui, ctx: &Ctx, view: &ViewState, r: Rect) {
     ui.rect(Rect::new(r.x, r.y, r.w, 1.0), theme::LINE_SOFT, 0.0);
     let hints: &[(&str, &str)] = match (view.tab, view.selected.is_some()) {
         (Tab::Overview, _) if view.list.is_some() => &[("Esc", "back to overview"), ("Space", "mark"), ("Enter", "open in map")],
-        (Tab::Map, _) => &[("Click", "open"), ("Scroll", "in / out"), ("Esc", "up"), ("⌥ Click", "select"), ("Right-click", "mark")],
+        (Tab::Map, _) => &[("Click", "open"), ("Scroll", "in / out"), ("Esc", "up"), (platform::KEY_SELECT_CLICK, "select"), ("Right-click", "mark")],
         (Tab::Overview, true) => &[("Space", "mark"), ("Enter", "open in map"), ("↑↓←→", "navigate")],
-        (Tab::Overview, false) => &[("↓", "navigate"), ("⌘2", "map")],
+        (Tab::Overview, false) => &[("↓", "navigate"), (platform::KEY_MAP_TAB, "map")],
     };
     let mut x = r.x + theme::GUTTER;
     let cy = r.cy();
