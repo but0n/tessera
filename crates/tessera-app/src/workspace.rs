@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tessera_domain::{MarkOutcome, NodeId, ReclaimPlan, ScanPolicy};
 
-use crate::ports::{DirectoryReader, Trash, VolumeProbe, VolumeStats};
+use crate::ports::{Desktop, DirectoryReader, Trash, VolumeProbe, VolumeStats};
 use crate::reclaim::{self, CommitPreview, CommitReport};
 use crate::scan::{ScanSession, Waker};
 
@@ -15,6 +15,7 @@ pub struct Services {
     pub reader: Arc<dyn DirectoryReader>,
     pub trash: Arc<dyn Trash>,
     pub volume: Arc<dyn VolumeProbe>,
+    pub desktop: Arc<dyn Desktop>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +58,16 @@ impl Workspace {
         self.volume = self.services.volume.probe(&root);
         self.session = ScanSession::start(root, self.services.reader.clone(), self.policy.clone(), self.waker.clone());
         self.plan.clear();
+    }
+
+    /// Shows an entry in the system file manager.
+    pub fn reveal(&self, id: NodeId) {
+        let path = self.session.inventory().read().path(id);
+        self.services.desktop.reveal(&path);
+    }
+
+    pub fn open_privacy_settings(&self) {
+        self.services.desktop.open_privacy_settings();
     }
 
     pub fn toggle_mark(&mut self, id: NodeId) -> MarkOutcome {

@@ -58,6 +58,8 @@ impl ReclaimHint {
             ".build" if has_sibling("Package.swift") => BuildArtifacts,
             "Caches" | ".cache" | ".npm" | ".cargo-cache" | "CachedData" | "Code Cache" | "GPUCache" | "ShaderCache" => Cache,
             ".Trash" | ".Trashes" => Trash,
+            // Per-user trash at the top of a volume (freedesktop.org spec).
+            n if n.starts_with(".Trash-") => Trash,
             _ => None,
         }
     }
@@ -72,5 +74,11 @@ mod tests {
         assert_eq!(ReclaimHint::detect("target", |_| false), ReclaimHint::None);
         assert_eq!(ReclaimHint::detect("target", |s| s == "Cargo.toml"), ReclaimHint::BuildArtifacts);
         assert_eq!(ReclaimHint::detect("node_modules", |_| false), ReclaimHint::Dependencies);
+    }
+
+    #[test]
+    fn trash_folders_of_both_desktops() {
+        assert_eq!(ReclaimHint::detect(".Trash", |_| false), ReclaimHint::Trash);
+        assert_eq!(ReclaimHint::detect(".Trash-1000", |_| false), ReclaimHint::Trash);
     }
 }

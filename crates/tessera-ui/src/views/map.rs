@@ -887,7 +887,7 @@ fn file_name(ui: &mut Ui, name: &str, typed: bool, style: &TextStyle, max_w: f32
 
 /// Pointer over cell `i`. A click opens its scope (the depth-1 folder it
 /// lies in): the map always descends one level, so the hierarchy unfolds
-/// predictably. ⌥-click selects the exact entry; right-click marks it.
+/// predictably. Alt-click (⌥) selects the exact entry; right-click marks it.
 fn interact(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &Screen, i: usize, out: &mut Vec<Action>) {
     let c = &layout.cells[i];
     let others = matches!(c.kind, CellKind::Others { .. });

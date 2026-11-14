@@ -18,6 +18,9 @@ Read `docs/adr/README.md` and `docs/domain/` before changing structure.
 - Colours are defined in OKLCH (ADR-0011); map hues come from `ViewState::family`.
 - Icons come from `gfx::icons` (ADR-0013). Add new ones as path strings on the
   24-unit grid, and prefer an icon or the layout over a new text label.
+- **Two platforms** (ADR-0014): macOS and Linux. OS-specific code lives in
+  `tessera-infra` behind a port, or in `tessera-ui::platform`; views carry
+  no `cfg`. Shortcut text comes from `platform`, never a literal ⌘.
 - Significant decisions get a new ADR (template `docs/adr/0000-template.md`).
 
 ## Checks

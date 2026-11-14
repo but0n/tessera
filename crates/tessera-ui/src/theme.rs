@@ -144,7 +144,8 @@ pub fn hint(h: ReclaimHint) -> Rgba {
     }
 }
 
-// Type scale (SF Pro via the system font; tabular figures for numbers).
+// Type scale (the platform UI face, see `gfx::text::Fonts`; tabular figures
+// for numbers).
 pub const DISPLAY: TextStyle = TextStyle::new(30.0, 600, Font::Num);
 pub const TITLE: TextStyle = TextStyle::new(17.0, 600, Font::Sans);
 pub const BODY: TextStyle = TextStyle::new(13.0, 400, Font::Sans);
@@ -180,8 +181,9 @@ pub const ROW_H: f32 = 26.0;
 pub const GUTTER: f32 = 16.0;
 pub const RADIUS: f32 = 10.0;
 pub const RADIUS_SM: f32 = 6.0;
-/// Space reserved for the macOS traffic lights in the transparent titlebar.
-pub const TRAFFIC_LIGHTS_W: f32 = 78.0;
+/// Where the top bar's content starts: past the traffic lights where the
+/// bar is the titlebar, on the sidebar's left edge elsewhere.
+pub const TOPBAR_LEAD: f32 = if crate::platform::INTEGRATED_TITLEBAR { 78.0 } else { GUTTER + 6.0 };
 
 #[cfg(test)]
 mod tests {

@@ -95,7 +95,7 @@ fn keyboard(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, out: &mut Vec<Action>)
         }
         return;
     }
-    let cmd = i.mods.super_key();
+    let cmd = crate::platform::command(i.mods);
     if cmd && i.char("1") {
         out.push(Action::SetTab(Tab::Overview));
     }

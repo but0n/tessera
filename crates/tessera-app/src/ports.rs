@@ -33,3 +33,13 @@ impl VolumeStats {
 pub trait VolumeProbe: Send + Sync + 'static {
     fn probe(&self, path: &Path) -> Option<VolumeStats>;
 }
+
+/// Hands the user over to the rest of their desktop. Fire and forget: must
+/// not block the caller, and failing is silent.
+pub trait Desktop: Send + Sync + 'static {
+    /// Shows `path` selected in the system file manager.
+    fn reveal(&self, path: &Path);
+    /// Opens the system settings where access to protected locations is
+    /// granted (ADR-0009). A no-op where nothing is ever sealed.
+    fn open_privacy_settings(&self);
+}

@@ -2,7 +2,8 @@
 //!
 //! Opening these without Full Disk Access blocks the calling thread on a
 //! consent prompt, or fails. A scan therefore *seals* them instead of
-//! reading them unless access was granted up front (ADR-0009).
+//! reading them unless access was granted up front (ADR-0009). Other
+//! platforms have no such prompts and seal nothing (ADR-0014).
 
 use std::path::{Path, PathBuf};
 

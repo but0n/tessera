@@ -2,9 +2,12 @@
 
 #[cfg(target_os = "macos")]
 mod bulk;
+mod desktop;
 mod portable;
 mod privacy;
 mod sample;
+#[cfg(target_os = "linux")]
+mod statx;
 mod trash_bin;
 mod volume;
 
@@ -14,19 +17,26 @@ use tessera_app::ports::DirectoryReader;
 
 #[cfg(target_os = "macos")]
 pub use bulk::BulkReader;
+pub use desktop::SystemDesktop;
 pub use portable::PortableReader;
 pub use privacy::{default_policy, has_full_disk_access, home_dir};
-pub use sample::{SampleReader, SampleTrash, SampleVolume, sample_root};
+pub use sample::{SampleDesktop, SampleReader, SampleTrash, SampleVolume, sample_root};
+#[cfg(target_os = "linux")]
+pub use statx::StatxReader;
 pub use trash_bin::SystemTrash;
 pub use volume::StatVfs;
 
-/// Fastest reader available on this platform (ADR-0005).
+/// The reader that knows this platform best (ADR-0005, ADR-0014).
 pub fn best_reader() -> Arc<dyn DirectoryReader> {
     #[cfg(target_os = "macos")]
     {
         Arc::new(BulkReader)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(StatxReader)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Arc::new(PortableReader)
     }

@@ -226,13 +226,8 @@ impl App {
                     view.reset();
                 }
             }
-            Action::Reveal(id) => {
-                let path = self.ws.session.inventory().read().path(id);
-                let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
-            }
-            Action::OpenPrivacySettings => {
-                let _ = std::process::Command::new("open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles").spawn();
-            }
+            Action::Reveal(id) => self.ws.reveal(id),
+            Action::OpenPrivacySettings => self.ws.open_privacy_settings(),
             Action::DragWindow => {
                 if let Some(g) = &self.gfx {
                     let _ = g.window.drag_window();
@@ -285,11 +280,18 @@ impl ApplicationHandler<Wake> for App {
         if self.gfx.is_some() {
             return;
         }
+        #[allow(unused_mut)]
         let mut attrs = Window::default_attributes().with_title("Tessera").with_inner_size(LogicalSize::new(1480.0, 920.0)).with_min_inner_size(LogicalSize::new(1120.0, 700.0));
         #[cfg(target_os = "macos")]
         {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // The app id: what compositors, docks and window rules match on.
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs = attrs.with_name("tessera", "tessera");
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(event_loop.owned_display_handle())));
@@ -312,7 +314,7 @@ impl ApplicationHandler<Wake> for App {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            alpha_mode: if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) { wgpu::CompositeAlphaMode::Opaque } else { caps.alpha_modes[0] },
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
             color_space: wgpu::SurfaceColorSpace::Auto,
@@ -401,12 +403,12 @@ mod tests {
     use tessera_app::Services;
     use tessera_app::cartography::{MapParams, MapRequest};
     use tessera_domain::ScanPolicy;
-    use tessera_infra::{SampleReader, SampleTrash, SampleVolume, sample_root};
+    use tessera_infra::{SampleDesktop, SampleReader, SampleTrash, SampleVolume, sample_root};
 
     /// The sample tree, scanned, with the root's map solved.
     fn app() -> App {
         let waker: tessera_app::scan::Waker = Arc::new(|| {});
-        let services = Services { reader: Arc::new(SampleReader), trash: Arc::new(SampleTrash), volume: Arc::new(SampleVolume) };
+        let services = Services { reader: Arc::new(SampleReader), trash: Arc::new(SampleTrash), volume: Arc::new(SampleVolume), desktop: Arc::new(SampleDesktop) };
         let ws = Workspace::open(sample_root(), services, ScanPolicy::default(), waker.clone());
         let mut app = App::new(ws, Cartographer::new(MapParams::default(), waker));
         let wait = |done: &dyn Fn() -> bool| {
