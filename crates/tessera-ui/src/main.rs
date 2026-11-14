@@ -108,16 +108,25 @@ fn main() {
         return;
     }
 
+    // SAFETY: nothing else runs yet in a process that will open a window:
+    // the scan, cartographer and font threads all start below.
+    unsafe { platform::adopt_display() };
     // Fonts take a while to load; do it while the window and GPU come up.
     let fonts = std::thread::Builder::new().name("tessera-fonts".into()).spawn(|| Fonts::load(&theme::TEXT_STYLES)).expect("font thread");
-    let event_loop = EventLoop::<app::Wake>::with_user_event().build().expect("event loop");
+    let event_loop = match EventLoop::<app::Wake>::with_user_event().build() {
+        Ok(event_loop) => event_loop,
+        Err(e) => {
+            eprintln!("tessera: cannot open a window: {e}");
+            eprintln!("tessera: `--snapshot OUT.png` renders without one");
+            std::process::exit(1);
+        }
+    };
     let proxy = Mutex::new(event_loop.create_proxy());
     let waker: Waker = Arc::new(move || {
         let _ = proxy.lock().send_event(app::Wake);
     });
     let ws = Workspace::open(root, services, policy, waker.clone());
     let carto = Cartographer::new(MapParams::default(), waker);
-    let mut app = app::App::new(ws, carto);
-    app.fonts = Some(fonts);
+    let mut app = app::App::new(ws, carto).with_fonts(fonts);
     event_loop.run_app(&mut app).expect("run");
 }

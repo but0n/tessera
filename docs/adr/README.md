@@ -21,4 +21,4 @@ ADRs are immutable once *Accepted*; change course with a new ADR that
 | [0011](0011-perceptual-colour-system.md) | OKLCH colours; hues derived from the hierarchy | Accepted |
 | [0012](0012-stepped-scroll-navigation.md) | Scroll and pinch step through the hierarchy, with a lean preview and latch | Accepted |
 | [0013](0013-icons-and-quiet-map.md) | Own vector icons; a three-level map labelled by available room | Accepted |
-| [0014](0014-linux-support.md) | Linux support: `statx` reader, mount roots as boundaries, platform seams | Accepted |
+| [0014](0014-linux-support.md) | Linux support: `getdents64` + `statx` reader, mount roots as boundaries, platform seams | Accepted |

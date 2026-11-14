@@ -13,12 +13,12 @@
 //! through the shared `RwLock` between batches.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use tessera_domain::{Descend, EntryKind, Insights, Inventory, Listing, NodeId, ScanPolicy};
 
 use crate::ports::DirectoryReader;
@@ -75,21 +75,24 @@ impl Walker {
     }
 }
 
-#[derive(Default)]
+/// Progress of one scan. It is running from the moment it exists until
+/// `finished` is set, once, by the ingest thread.
 pub struct ScanStats {
     pub dirs: AtomicU64,
     pub entries: AtomicU64,
-    started: Mutex<Option<Instant>>,
-    finished: Mutex<Option<Instant>>,
+    started: Instant,
+    finished: OnceLock<Instant>,
 }
 
 impl ScanStats {
+    fn start() -> ScanStats {
+        ScanStats { dirs: AtomicU64::new(0), entries: AtomicU64::new(0), started: Instant::now(), finished: OnceLock::new() }
+    }
     pub fn elapsed(&self) -> Duration {
-        let s = self.started.lock().unwrap_or_else(Instant::now);
-        self.finished.lock().unwrap_or_else(Instant::now) - s
+        self.finished.get().copied().unwrap_or_else(Instant::now) - self.started
     }
     pub fn is_finished(&self) -> bool {
-        self.finished.lock().is_some()
+        self.finished.get().is_some()
     }
 }
 
@@ -108,9 +111,8 @@ impl ScanSession {
     pub fn start(root: PathBuf, reader: Arc<dyn DirectoryReader>, policy: ScanPolicy, waker: Waker) -> ScanSession {
         let inventory = Arc::new(RwLock::new(Inventory::new(root.clone())));
         let insights = Arc::new(RwLock::new(Arc::new(Insights::default())));
-        let stats = Arc::new(ScanStats::default());
+        let stats = Arc::new(ScanStats::start());
         let cancel = Arc::new(AtomicBool::new(false));
-        *stats.started.lock() = Some(Instant::now());
         let reader_name = reader.name();
 
         let threads = std::thread::available_parallelism().map_or(8, |n| n.get()).clamp(4, 16) * 2;
@@ -216,7 +218,7 @@ impl IngestCtx {
                 break;
             }
         }
-        *self.stats.finished.lock() = Some(Instant::now());
+        let _ = self.stats.finished.set(Instant::now());
         (self.waker)();
     }
 }

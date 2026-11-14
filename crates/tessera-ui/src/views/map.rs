@@ -16,7 +16,7 @@ use super::widgets;
 use crate::gfx::cell_flags;
 use crate::gfx::icons::Icon;
 use crate::gfx::text::TextStyle;
-use crate::state::{Action, FADE_DURATION, Transition, ViewState, ZOOM_DURATION, ZOOM_PATIENCE, ZoomDir};
+use crate::state::{Action, Arrival, Clock, FADE_DURATION, Step, Transition, ViewState, ZOOM_PATIENCE, ZoomDir};
 use crate::theme::{self, Tone, alpha};
 use crate::ui::{Align, Rect, Ui, ease_in_out, ease_out};
 
@@ -25,8 +25,6 @@ const HEADER_H: f32 = 52.0;
 const SCROLL_STEP: f32 = 120.0;
 /// Pinch magnification that makes one step.
 const PINCH_STEP: f32 = 0.35;
-/// Input pause that ends a gesture (and releases its latch).
-const QUIET: Duration = Duration::from_millis(220);
 /// How far the camera leans in (fraction of the zoom) while a scroll
 /// builds up, and how far the map shrinks while scrolling out.
 const LEAN_IN: f32 = 0.14;
@@ -150,10 +148,10 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
 
     // 1. Scope transition.
     if let Some(mut tr) = view.transition.take() {
-        if tr.start.is_none() && (current.is_some() || now - tr.asked > ZOOM_PATIENCE) {
-            tr.start = Some(now);
+        if tr.clock == Clock::Waiting && (current.is_some() || now - tr.asked > ZOOM_PATIENCE) {
+            tr.clock = Clock::Running(now);
         }
-        let t = tr.start.map_or(0.0, |s| (now - s).as_secs_f32() / ZOOM_DURATION);
+        let t = tr.progress(now);
         let waiting = current.is_none() && now - tr.asked < ZOOM_PATIENCE * 4;
         hold_gesture(ui, view, map_rect);
         if t < 1.0 || waiting {
@@ -197,11 +195,14 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
         return;
     }
     // The arrival pulse starts when the new scope is first on screen.
-    if !stale && let Some((id, start)) = view.arrival {
-        match start {
-            None => view.arrival = Some((id, Some(now))),
-            Some(t) if (now - t).as_secs_f32() > PULSE => view.arrival = None,
-            _ => ui.animating = true,
+    if !stale {
+        view.arrival = match view.arrival {
+            Some(Arrival::Awaited(id)) => Some(Arrival::Pulsing(id, now)),
+            Some(Arrival::Pulsing(_, since)) if (now - since).as_secs_f32() > PULSE => None,
+            other => other,
+        };
+        if view.arrival.is_some() {
+            ui.animating = true;
         }
     }
     let full = Camera::full(&layout);
@@ -238,10 +239,6 @@ pub fn draw(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, area: Rect, out: &mut 
 /// [-1, 1] to preview. Steps fire at ±1: into `enter`, or up a level.
 #[allow(clippy::too_many_arguments)]
 fn gesture(ui: &mut Ui, view: &mut ViewState, layout: &MapLayout, hovered: Option<usize>, enter: Option<usize>, can_up: bool, map_rect: Rect, out: &mut Vec<Action>) -> f32 {
-    let now = Instant::now();
-    let g = &mut view.gesture;
-    let dt = g.last_frame.map_or(0.0, |t| (now - t).as_secs_f32().min(0.1));
-    g.last_frame = Some(now);
     let input = ui.input;
     let mut delta = 0.0;
     if ui.hovered(map_rect) {
@@ -251,60 +248,32 @@ fn gesture(ui: &mut Ui, view: &mut ViewState, layout: &MapLayout, hovered: Optio
             delta = input.wheel.1.signum();
         }
     }
-    if delta != 0.0 {
-        let quiet = g.last_input.is_none_or(|t| now - t > QUIET);
-        let reversed = g.acc != 0.0 && g.acc.signum() != delta.signum();
-        if quiet || reversed {
-            g.latched = false;
-            if reversed {
-                g.acc = 0.0;
-            }
-        }
-        g.last_input = Some(now);
-        if !g.latched {
-            g.acc += delta;
-        }
-    } else if g.last_input.is_none_or(|t| now - t > Duration::from_millis(90)) {
-        // Released short of a step: spring back.
-        g.acc *= (-dt * 14.0).exp();
-        if g.acc.abs() < 0.002 {
-            g.acc = 0.0;
-        }
-    }
-    // Nowhere to go: resist like a rubber band.
-    let open = if g.acc > 0.0 { enter.is_some() } else { can_up };
-    if !open {
-        g.acc = g.acc.clamp(-0.22, 0.22);
-    }
-    if g.acc != 0.0 {
+    let step = view.gesture.feed(Instant::now(), delta, enter.is_some(), can_up);
+    let p = view.gesture.progress();
+    if step.is_some() || p != 0.0 {
         ui.animating = true;
     }
-    if open && g.acc.abs() >= 1.0 {
-        let dir = g.acc.signum();
-        g.latched = true;
-        g.acc = 0.0;
-        g.handoff = if dir > 0.0 { LEAN_IN } else { 0.0 };
-        match enter {
-            Some(sc) if dir > 0.0 => {
-                out.push(Action::Focus(layout.cells[sc].node));
-                view.arrival = hovered.map(|h| (layout.cells[h].node, None));
-            }
-            _ => out.push(Action::FocusUp),
+    match (step, enter) {
+        (Some(Step::In), Some(sc)) => {
+            view.gesture.handoff = LEAN_IN;
+            out.push(Action::Focus(layout.cells[sc].node));
+            view.arrival = hovered.map(|h| Arrival::Awaited(layout.cells[h].node));
+            1.0
         }
-        return dir * if dir > 0.0 { 1.0 } else { 0.0 };
+        (Some(_), _) => {
+            view.gesture.handoff = 0.0;
+            out.push(Action::FocusUp);
+            0.0
+        }
+        // Ease so the first bit of a scroll is clearly felt.
+        (None, _) => p.signum() * (1.0 - (1.0 - p.abs()).powi(2)),
     }
-    let p = g.acc.clamp(-1.0, 1.0);
-    // Ease so the first bit of a scroll is clearly felt.
-    p.signum() * (1.0 - (1.0 - p.abs()).powi(2))
 }
 
 /// While a transition runs, input only keeps the gesture's latch alive.
 fn hold_gesture(ui: &Ui, view: &mut ViewState, map_rect: Rect) {
-    if ui.hovered(map_rect) && (ui.input.wheel.1 != 0.0 || ui.input.pinch != 0.0) {
-        view.gesture.last_input = Some(Instant::now());
-    }
-    view.gesture.acc = 0.0;
-    view.gesture.last_frame = None;
+    let input = ui.hovered(map_rect) && (ui.input.wheel.1 != 0.0 || ui.input.pinch != 0.0);
+    view.gesture.hold(Instant::now(), input);
 }
 
 /// One frame of a scope change at clock `t` ∈ [0, 1]; `e` is the eased
@@ -488,10 +457,10 @@ fn cells(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s: &S
     }
 
     // The entry the user is following and its ancestors: labelled first.
-    let anchor = view.arrival.map(|a| a.0).or(view.selected);
+    let anchor = view.arrival.map(Arrival::node).or(view.selected);
     let chain: Vec<NodeId> = anchor.map(|a| ctx.inv.ancestors(a).collect()).unwrap_or_default();
     let pulse = match view.arrival {
-        Some((id, Some(t))) => {
+        Some(Arrival::Pulsing(id, t)) => {
             let age = t.elapsed().as_secs_f32();
             Some((id, smoothstep(0.0, 0.12, age) * (1.0 - smoothstep(0.15, PULSE, age))))
         }
@@ -913,7 +882,7 @@ fn interact(ui: &mut Ui, ctx: &Ctx, view: &mut ViewState, layout: &MapLayout, s:
             // stays identifiable (ring, label, pulse) in the new view.
             out.push(Action::Focus(scope.node));
             out.push(Action::Select(c.node));
-            view.arrival = Some((c.node, None));
+            view.arrival = Some(Arrival::Awaited(c.node));
         } else if scope.kind == CellKind::File {
             out.push(Action::Select(scope.node));
         }

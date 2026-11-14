@@ -149,7 +149,7 @@ pub fn run(ws: Workspace, carto: Cartographer, opts: Options) {
         std::thread::sleep(wait);
         out = frame(&mut app, &input, &mut renderer);
         if let Some(tr) = &app.view.transition {
-            let t = tr.start.map_or(0.0, |s| s.elapsed().as_secs_f32() / crate::state::ZOOM_DURATION);
+            let t = tr.progress(Instant::now());
             eprintln!("transition {:?} at t={t:.2}", tr.dir);
         }
     }
@@ -173,11 +173,11 @@ pub fn run(ws: Workspace, carto: Cartographer, opts: Options) {
             std::thread::sleep(wait);
             out = frame(&mut app, &input, &mut renderer);
             if let Some(tr) = &app.view.transition {
-                let t = tr.start.map_or(0.0, |s| s.elapsed().as_secs_f32() / crate::state::ZOOM_DURATION);
+                let t = tr.progress(Instant::now());
                 eprintln!("transition {:?} at t={t:.2} (pre {:.2})", tr.dir, tr.pre);
             }
         } else {
-            eprintln!("lean: {:.2}", app.view.gesture.acc);
+            eprintln!("lean: {:.2}", app.view.gesture.progress());
         }
     }
     let frame = out;

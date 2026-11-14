@@ -16,7 +16,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::gfx::Renderer;
 use crate::gfx::text::Fonts;
-use crate::state::{Action, Tab, Transition, ViewState, ZoomDir};
+use crate::state::{Action, Arrival, Clock, Tab, Transition, ViewState, ZoomDir};
 use crate::theme;
 use crate::ui::{Frame, Input, Ui};
 use crate::views::{self, Ctx};
@@ -35,25 +35,45 @@ struct Gfx {
     window: Arc<Window>,
 }
 
+/// The window's life: none until the event loop resumes, then one for good.
+enum Shell {
+    /// Fonts may already be loading in the background meanwhile.
+    Launching {
+        fonts: Option<JoinHandle<Fonts>>,
+    },
+    Running(Box<Gfx>),
+}
+
 pub struct App {
     pub ws: Workspace,
     pub carto: Cartographer,
     pub view: ViewState,
     input: Input,
-    gfx: Option<Gfx>,
-    /// Fonts being loaded in the background while the window comes up.
-    pub fonts: Option<JoinHandle<Fonts>>,
+    shell: Shell,
     pub start: Instant,
     cursor: CursorIcon,
 }
 
 impl App {
     pub fn new(ws: Workspace, carto: Cartographer) -> App {
-        App { ws, carto, view: ViewState::default(), input: Input::default(), gfx: None, fonts: None, start: Instant::now(), cursor: CursorIcon::Default }
+        App { ws, carto, view: ViewState::default(), input: Input::default(), shell: Shell::Launching { fonts: None }, start: Instant::now(), cursor: CursorIcon::Default }
+    }
+
+    /// Fonts being loaded on another thread, to pick up once the window exists.
+    pub fn with_fonts(mut self, fonts: JoinHandle<Fonts>) -> App {
+        self.shell = Shell::Launching { fonts: Some(fonts) };
+        self
+    }
+
+    fn gfx(&self) -> Option<&Gfx> {
+        match &self.shell {
+            Shell::Running(gfx) => Some(gfx),
+            Shell::Launching { .. } => None,
+        }
     }
 
     fn request_redraw(&self) {
-        if let Some(g) = &self.gfx {
+        if let Some(g) = self.gfx() {
             g.window.request_redraw();
         }
     }
@@ -68,7 +88,8 @@ impl App {
             }
             self.fix_dangling();
         }
-        let Some(gfx) = self.gfx.as_mut() else { return };
+        let Shell::Running(gfx) = &mut self.shell else { return };
+        let gfx = &mut **gfx;
         // Acquire the target first. Building a frame consumes input (scroll
         // deltas move things), so a frame that cannot be shown must not be
         // built: its input would be applied again by the retry.
@@ -156,10 +177,10 @@ impl App {
             let now = Instant::now();
             if dir == ZoomDir::Out {
                 // Coming back out: point at the folder just left.
-                view.arrival = Some((pivot, None));
+                view.arrival = Some(Arrival::Awaited(pivot));
             }
             let pre = if dir == ZoomDir::Fade { 0.0 } else { std::mem::take(&mut view.gesture.handoff) };
-            view.transition = Some(Transition { old, dir, pivot, start: (dir == ZoomDir::In).then_some(now), asked: now, pre });
+            view.transition = Some(Transition { old, dir, pivot, clock: if dir == ZoomDir::In { Clock::Running(now) } else { Clock::Waiting }, asked: now, pre });
         } else {
             // Nothing to animate from. A transition still in flight was aimed
             // at the scope being left; it must not play out over this one.
@@ -229,7 +250,7 @@ impl App {
             Action::Reveal(id) => self.ws.reveal(id),
             Action::OpenPrivacySettings => self.ws.open_privacy_settings(),
             Action::DragWindow => {
-                if let Some(g) = &self.gfx {
+                if let Some(g) = self.gfx() {
                     let _ = g.window.drag_window();
                 }
                 self.input.down = false;
@@ -277,9 +298,8 @@ pub fn build_frame(
 
 impl ApplicationHandler<Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gfx.is_some() {
-            return;
-        }
+        let Shell::Launching { fonts } = &mut self.shell else { return };
+        let fonts = fonts.take();
         #[allow(unused_mut)]
         let mut attrs = Window::default_attributes().with_title("Tessera").with_inner_size(LogicalSize::new(1480.0, 920.0)).with_min_inner_size(LogicalSize::new(1120.0, 700.0));
         #[cfg(target_os = "macos")]
@@ -320,9 +340,9 @@ impl ApplicationHandler<Wake> for App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
-        let fonts = self.fonts.take().and_then(|h| h.join().ok()).unwrap_or_else(|| Fonts::load(&theme::TEXT_STYLES));
+        let fonts = fonts.and_then(|h| h.join().ok()).unwrap_or_else(|| Fonts::load(&theme::TEXT_STYLES));
         let renderer = Renderer::new(device, queue, format, fonts);
-        self.gfx = Some(Gfx { instance, surface, config, renderer, window });
+        self.shell = Shell::Running(Box::new(Gfx { instance, surface, config, renderer, window }));
         self.request_redraw();
     }
 
@@ -331,7 +351,8 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let Some(gfx) = self.gfx.as_mut() else { return };
+        let Shell::Running(gfx) = &mut self.shell else { return };
+        let gfx = &mut **gfx;
         let scale = gfx.window.scale_factor();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),

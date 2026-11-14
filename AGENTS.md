@@ -21,6 +21,10 @@ Read `docs/adr/README.md` and `docs/domain/` before changing structure.
 - **Two platforms** (ADR-0014): macOS and Linux. OS-specific code lives in
   `tessera-infra` behind a port, or in `tessera-ui::platform`; views carry
   no `cfg`. Shortcut text comes from `platform`, never a literal ⌘.
+- **Phases are enums.** State that moves through stages (`state::Lean`,
+  `Clock`, `Arrival`, `app::Shell`) is one enum with a variant per stage,
+  never a set of flags and `Option`s that must agree. Put the transitions
+  in a method and test them.
 - Significant decisions get a new ADR (template `docs/adr/0000-template.md`).
 
 ## Checks

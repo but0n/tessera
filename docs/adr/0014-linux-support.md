@@ -1,4 +1,4 @@
-# ADR-0014: Linux support — `statx` reader, mount roots as boundaries, platform seams
+# ADR-0014: Linux support — `getdents64` + `statx` reader, mount roots as boundaries, platform seams
 
 - **Status:** Accepted
 - **Date:** 2026-11-14
@@ -21,15 +21,35 @@ result was not usable there:
   only unique per subvolume, while hard links are de-duplicated by inode
   across the whole scan (ADR-0005).
 
+- A shell that was not started from the desktop (ssh, tmux, an editor's
+  terminal) has neither `WAYLAND_DISPLAY` nor `DISPLAY`; winit then fails
+  and the app panicked.
+
 Measured on the development machine (24 threads, btrfs on NVMe, warm cache),
-home folder of 1.29 M entries: `readdir + lstat` 238 ms, `readdir + statx`
-238 ms. Both are at the floor; there is no speed to win from the syscall.
+home folder of 1.30 M entries:
+
+| reader | time |
+|--------|-----:|
+| `du -sx` | 2430 ms |
+| `dua -x` | 930 ms |
+| `readdir + lstat` (portable) | 245 ms |
+| `readdir + statx` (libc `readdir`) | 240 ms |
+| `getdents64 + statx` | **225 ms** |
+
+Swapping `lstat` for `statx` wins nothing by itself. libc's `opendir`
+costs an `fstat`, an `fcntl` and a heap buffer per directory; calling
+`getdents64` into a thread-local buffer removes them (four syscalls per
+directory instead of six). Reader threads scale sublinearly past 16 (8:
+390 ms, 16: 240 ms, 24–48: 200 ms for the walk alone) with kernel time
+dominating, so the remaining cost is contention inside the kernel, not
+ours. Cold-cache behaviour was not measured.
 
 ## Decision
 
 1. **Linux is a supported platform**, checked by CI next to macOS.
-2. **Reader**: `StatxReader` (`readdir` + `statx` relative to the directory
-   fd) is `best_reader()` on Linux. It is chosen for correctness, not speed:
+2. **Reader**: `StatxReader` (`getdents64` + `statx` relative to the
+   directory fd) is `best_reader()` on Linux. It is chosen for correctness
+   first:
    - a **boundary is a mount root** (`STATX_ATTR_MOUNT_ROOT`), falling back
      to the device comparison where the kernel does not report it. Nested
      btrfs subvolumes are entered; `/proc`, other disks and separately
@@ -54,12 +74,18 @@ home folder of 1.29 M entries: `readdir + lstat` 238 ms, `readdir + statx`
    of a preference list headed by Inter, Adwaita Sans and Noto Sans.
 7. The window carries the app id `tessera` and normal server- or client-side
    decorations; it does not draw its own titlebar.
+8. **Display.** When the environment names no display, startup adopts the
+   compositor socket in `$XDG_RUNTIME_DIR` (`wayland-N`), else the X server
+   in `/tmp/.X11-unix`. If there is still no window to open, it says so and
+   exits with status 1 instead of panicking.
 
 ## Consequences
 
 - One more reader to keep honest: `statx::tests` assert agreement with the
-  portable reader, one identity per hard-link set, and that `/proc` is a
-  boundary while `/etc` is not.
+  portable reader (also on a directory larger than the buffer), one identity
+  per hard-link set, and that `/proc` is a boundary while `/etc` is not.
+- The reader parses `linux_dirent64` records by hand; the layout is kernel
+  ABI and cannot change.
 - Snapshots inside the scanned tree are counted at full size although they
   share extents, as `du` does. Shared-extent accounting is out of scope.
 - No new crates. `dbus-send` and `xdg-open` are expected on a desktop
@@ -75,8 +101,9 @@ home folder of 1.29 M entries: `readdir + lstat` 238 ms, `readdir + statx`
   the default filesystem of several distributions.
 - **Parse `/proc/self/mountinfo` for boundaries** — a second source of truth
   to keep in sync with a walk that already stats every entry.
-- **`getdents64` + `io_uring` batched `statx`** — the scan is already at the
-  page-cache floor; complexity without a measured gain.
+- **`io_uring` batched `statx`** — the kernel does the same work per entry
+  and the walk is bound by contention there; complexity without a measured
+  gain.
 - **Ask fontconfig for `sans-serif`** — respects the user's setting but
   yields faces without the weights and features the type scale relies on.
 - **A D-Bus client crate for reveal** — a dependency tree for one method
