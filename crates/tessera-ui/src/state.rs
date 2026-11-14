@@ -73,26 +73,145 @@ pub struct Transition {
     pub old: Arc<MapLayout>,
     pub dir: ZoomDir,
     pub pivot: NodeId,
-    /// Clock start; zooming out waits for the new layout so it can aim.
-    pub start: Option<Instant>,
+    pub clock: Clock,
     pub asked: Instant,
     /// Progress already covered by a scroll preview, so a gesture flows
     /// into the zoom without a jump.
     pub pre: f32,
 }
 
-/// Scroll or pinch on the map, building toward a scope change (ADR-0010).
-/// `acc` is signed progress: +1 opens the scope under the pointer, -1 goes
-/// up. Once a step fires the gesture is `latched` until input goes quiet,
-/// so one flick (and its momentum tail) moves exactly one level.
+/// Whether a transition is moving yet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Clock {
+    /// Holding the first frame until the new layout arrives (zooming out
+    /// and fading need it to aim) or patience runs out.
+    Waiting,
+    Running(Instant),
+}
+
+impl Transition {
+    /// Clock progress at `now`: 0 while waiting, 1 when the zoom is over.
+    pub fn progress(&self, now: Instant) -> f32 {
+        match self.clock {
+            Clock::Waiting => 0.0,
+            Clock::Running(since) => (now - since).as_secs_f32() / ZOOM_DURATION,
+        }
+    }
+}
+
+/// The entry a scope change was about (the cell clicked, or the folder just
+/// left). It keeps its label and pulses once when the new map first shows
+/// it, so the eye can follow it through the zoom.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    /// The new scope is not on screen yet.
+    Awaited(NodeId),
+    /// On screen since the instant; over after the pulse.
+    Pulsing(NodeId, Instant),
+}
+
+impl Arrival {
+    pub fn node(self) -> NodeId {
+        match self {
+            Arrival::Awaited(id) | Arrival::Pulsing(id, _) => id,
+        }
+    }
+}
+
+/// Scroll or pinch on the map, building toward a scope change (ADR-0012).
 #[derive(Default)]
 pub struct Gesture {
-    pub acc: f32,
-    pub last_input: Option<Instant>,
-    pub last_frame: Option<Instant>,
-    pub latched: bool,
+    lean: Lean,
+    last_input: Option<Instant>,
+    last_frame: Option<Instant>,
     /// Preview progress handed to the transition a step starts.
     pub handoff: f32,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Lean {
+    /// Signed progress toward a step: +1 opens the scope under the pointer,
+    /// -1 goes up.
+    Building(f32),
+    /// A step fired. Input is ignored until it goes quiet, so one flick
+    /// (and its momentum tail) moves exactly one level.
+    Latched,
+}
+
+impl Default for Lean {
+    fn default() -> Self {
+        Lean::Building(0.0)
+    }
+}
+
+/// One level of map navigation (ADR-0012).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    In,
+    Up,
+}
+
+/// Input pause that ends a gesture (and releases its latch).
+const QUIET: Duration = Duration::from_millis(220);
+/// Input pause after which an unfinished lean springs back.
+const RELEASE: Duration = Duration::from_millis(90);
+/// How far a lean goes when there is nowhere to step to.
+const RUBBER_BAND: f32 = 0.22;
+
+impl Gesture {
+    /// Signed progress toward a step, in (-1, 1).
+    pub fn progress(&self) -> f32 {
+        match self.lean {
+            Lean::Building(acc) => acc,
+            Lean::Latched => 0.0,
+        }
+    }
+
+    /// Advances the gesture by one frame. `delta` is this frame's input in
+    /// steps; `can_in` / `can_up` say whether there is a level to step to.
+    /// Returns the step that fired, if any.
+    pub fn feed(&mut self, now: Instant, delta: f32, can_in: bool, can_up: bool) -> Option<Step> {
+        let dt = self.last_frame.map_or(0.0, |t| (now - t).as_secs_f32().min(0.1));
+        self.last_frame = Some(now);
+        let quiet_for = self.last_input.map(|t| now - t);
+        if delta != 0.0 {
+            self.last_input = Some(now);
+        }
+        let mut acc = match self.lean {
+            Lean::Latched if delta != 0.0 && quiet_for.is_none_or(|q| q > QUIET) => delta,
+            Lean::Latched => return None,
+            // A reversal starts over from rest.
+            Lean::Building(acc) if delta != 0.0 => delta + if acc != 0.0 && acc.signum() != delta.signum() { 0.0 } else { acc },
+            // Released short of a step: spring back.
+            Lean::Building(acc) if quiet_for.is_none_or(|q| q > RELEASE) => {
+                let acc = acc * (-dt * 14.0).exp();
+                if acc.abs() < 0.002 { 0.0 } else { acc }
+            }
+            Lean::Building(acc) => acc,
+        };
+        // Nowhere to go: resist like a rubber band.
+        let open = if acc > 0.0 { can_in } else { can_up };
+        if !open {
+            acc = acc.clamp(-RUBBER_BAND, RUBBER_BAND);
+        }
+        if open && acc.abs() >= 1.0 {
+            self.lean = Lean::Latched;
+            return Some(if acc > 0.0 { Step::In } else { Step::Up });
+        }
+        self.lean = Lean::Building(acc);
+        None
+    }
+
+    /// While a transition runs, input only keeps the latch alive.
+    pub fn hold(&mut self, now: Instant, input: bool) {
+        if input {
+            self.last_input = Some(now);
+        }
+        if let Lean::Building(acc) = &mut self.lean {
+            *acc = 0.0;
+        }
+        self.last_frame = None;
+    }
 }
 
 pub const ZOOM_DURATION: f32 = 0.46;
@@ -119,10 +238,7 @@ pub struct ViewState {
     pub toast: Option<Toast>,
     pub transition: Option<Transition>,
     pub gesture: Gesture,
-    /// The entry a scope change was about (the cell clicked, or the folder
-    /// just left), and when the new map first showed it. It keeps its label
-    /// and pulses once on arrival so the eye can follow it through the zoom.
-    pub arrival: Option<(NodeId, Option<Instant>)>,
+    pub arrival: Option<Arrival>,
     /// What the pointer is over in the map: (entry, scope a click enters).
     pub map_hover: Option<(NodeId, NodeId)>,
     /// Smooth tree scrolling: (from, to, start).
@@ -241,5 +357,68 @@ impl ViewState {
             head = a;
         }
         self.hue(inv, head)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FRAME: Duration = Duration::from_millis(16);
+
+    /// One flick, with its momentum tail, moves exactly one level; after a
+    /// pause the next flick steps again.
+    #[test]
+    fn a_flick_steps_once_until_input_goes_quiet() {
+        let mut g = Gesture::default();
+        let mut now = Instant::now();
+        let mut steps = 0;
+        for _ in 0..30 {
+            steps += g.feed(now, 0.3, true, true).is_some() as usize;
+            now += FRAME;
+        }
+        assert_eq!(steps, 1);
+        assert_eq!(g.progress(), 0.0);
+        now += QUIET + FRAME;
+        assert_eq!(g.feed(now, 0.6, true, true), None);
+        assert_eq!(g.feed(now + FRAME, 0.6, true, true), Some(Step::In));
+    }
+
+    #[test]
+    fn a_reversal_starts_over_and_steps_the_other_way() {
+        let mut g = Gesture::default();
+        let now = Instant::now();
+        assert_eq!(g.feed(now, 0.8, true, true), None);
+        assert_eq!(g.feed(now + FRAME, -0.5, true, true), None);
+        assert_eq!(g.progress(), -0.5);
+        assert_eq!(g.feed(now + FRAME * 2, -0.5, true, true), Some(Step::Up));
+    }
+
+    #[test]
+    fn nowhere_to_go_resists_and_an_unfinished_lean_springs_back() {
+        let mut g = Gesture::default();
+        let mut now = Instant::now();
+        assert_eq!(g.feed(now, 5.0, false, true), None);
+        assert_eq!(g.progress(), RUBBER_BAND);
+        now += RELEASE + FRAME;
+        for _ in 0..120 {
+            g.feed(now, 0.0, false, true);
+            now += FRAME;
+        }
+        assert_eq!(g.progress(), 0.0);
+    }
+
+    /// Momentum arriving during the zoom keeps the latch, so the tail of
+    /// the flick that started the zoom cannot start another.
+    #[test]
+    fn input_during_a_transition_keeps_the_latch() {
+        let mut g = Gesture::default();
+        let mut now = Instant::now();
+        assert_eq!(g.feed(now, 1.0, true, true), Some(Step::In));
+        for _ in 0..40 {
+            now += FRAME;
+            g.hold(now, true);
+        }
+        assert_eq!(g.feed(now + FRAME, 1.0, true, true), None);
     }
 }
